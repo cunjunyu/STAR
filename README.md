@@ -28,7 +28,7 @@ The datasets are selected on arguments '--test_set'. Five datasets in ETH/UCY in
 This command is to train model for ETH-hotel and start test at epoch 10. For different dataset, change 'hotel' to other datasets named in the last section.
 
 ```
-python trainval.py --test_set hotel --start_test 10'
+python trainval.py --test_set hotel --start_test 10
 ```
 
 During training, the model for Best FDE on the corresponding test dataset would be record.
