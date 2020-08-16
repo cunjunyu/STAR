@@ -1,0 +1,4 @@
+*.cpkl
+__pycache__/
+*.pyc
+*.txt
