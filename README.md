@@ -33,6 +33,20 @@ python trainval.py --test_set hotel --start_test 10
 
 During training, the model for Best FDE on the corresponding test dataset would be record.
 
+### Cite STAR
+
+If you find this repo useful, please consider citing our paper
+```bibtex
+@inproceedings{
+    YuMa2020Spatio,
+    title={Spatio-Temporal Graph Transformer Networks for Pedestrian Trajectory Prediction},
+    author={Cunjun Yu and Xiao Ma and Jiawei Ren and Haiyu Zhao and Shuai Yi},
+    booktitle={Proceedings of the European Conference on Computer Vision (ECCV)},
+    month = {August},
+    year={2020}
+}
+```
+
 
 ### Reference
 
