@@ -285,13 +285,13 @@ class TransformerModel(nn.Module):
 
 class STAR(torch.nn.Module):
 
-    def __init__(self, args, dropout=0.1):
+    def __init__(self, args, dropout_prob=0):
         super(STAR, self).__init__()
 
         # set parameters for network architecture
         self.embedding_size = [32]
         self.output_size = 2
-        self.dropout_prob = dropout
+        self.dropout_prob = dropout_prob
         self.args = args
 
         self.temporal_encoder_layer = TransformerEncoderLayer(d_model=32, nhead=8)
@@ -319,6 +319,7 @@ class STAR(torch.nn.Module):
         # ReLU and dropout init
         self.relu = nn.ReLU()
         self.dropout_in = nn.Dropout(self.dropout_prob)
+        self.dropout_in2 = nn.Dropout(self.dropout_prob)
 
     def get_st_ed(self, batch_num):
         """
@@ -445,7 +446,7 @@ class STAR(torch.nn.Module):
                 temporal_input_embedded = self.dropout_in(self.relu(self.input_embedding_layer_temporal(nodes_current)))
                 temporal_input_embedded[:framenum] = GM[:framenum, node_index]
 
-            spatial_input_embedded_ = self.dropout_in(self.relu(self.input_embedding_layer_spatial(node_abs)))
+            spatial_input_embedded_ = self.dropout_in2(self.relu(self.input_embedding_layer_spatial(node_abs)))
 
             spatial_input_embedded = self.spatial_encoder_1(spatial_input_embedded_[-1].unsqueeze(1), nei_list)
 

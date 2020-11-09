@@ -44,14 +44,13 @@ class processor(object):
 
     def load_model(self):
 
-        if self.args.load_model > 0:
+        if self.args.load_model is not None:
             self.args.model_save_path = self.args.save_dir + '/' + self.args.train_model + '/' + self.args.train_model + '_' + \
                                         str(self.args.load_model) + '.tar'
             print(self.args.model_save_path)
             if os.path.isfile(self.args.model_save_path):
                 print('Loading checkpoint')
-                checkpoint = torch.load(self.args.model_save_path,
-                                        map_location={'cuda:0': 'cuda:' + str(self.args.gpu)})
+                checkpoint = torch.load(self.args.model_save_path)
                 model_epoch = checkpoint['epoch']
                 self.net.load_state_dict(checkpoint['state_dict'])
                 print('Loaded checkpoint at epoch', model_epoch)
@@ -59,17 +58,17 @@ class processor(object):
     def set_optimizer(self):
 
         self.optimizer = torch.optim.Adam(self.net.parameters(), lr=self.args.learning_rate)
-        self.criterion = nn.MSELoss(reduce=False)
+        self.criterion = nn.MSELoss(reduction='none')
 
     def test(self):
 
         print('Testing begin')
+        self.load_model()
         self.net.eval()
-        test_error, test_final_error = self.test_epoch(self.args.load_model)
-        print('Set: {}, epoch: {:.5f},test_error: {:.5f} test_final_error: {:.5f}'.format(self.args.test_set,
+        test_error, test_final_error = self.test_epoch()
+        print('Set: {}, epoch: {},test_error: {} test_final_error: {}'.format(self.args.test_set,
                                                                                           self.args.load_model,
-                                                                                          test_error, test_final_error))
-
+                                                                                       test_error, test_final_error))
     def train(self):
 
         print('Training begin')
@@ -80,6 +79,7 @@ class processor(object):
             train_loss = self.train_epoch(epoch)
 
             if epoch >= self.args.start_test:
+                self.net.eval()
                 test_error, test_final_error = self.test_epoch()
                 self.best_ade = test_error if test_final_error < self.best_fde else self.best_ade
                 self.best_epoch = epoch if test_final_error < self.best_fde else self.best_epoch
@@ -166,12 +166,12 @@ class processor(object):
 
             inputs_forward = batch_abs[:-1], batch_norm[:-1], shift_value[:-1], seq_list[:-1], nei_list[:-1], nei_num[
                                                                                                               :-1], batch_pednum
-            self.net.zero_grad()
 
             all_output = []
             for i in range(self.args.sample_num):
                 outputs_infer = self.net.forward(inputs_forward, iftest=True)
                 all_output.append(outputs_infer)
+            self.net.zero_grad()
 
             all_output = torch.stack(all_output)
 
