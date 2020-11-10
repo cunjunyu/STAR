@@ -3,7 +3,12 @@ Code for [Spatio-Temporal Graph Transformer Networks for Pedestrian Trajectory P
 
 ### Environment
 
-The code is tested on GTX 1080Ti, Python 3.6.3, numpy 1.17.5, pytorch 1.1.0 and CUDA9.0.
+```bash
+pip install numpy==1.18.1
+pip install torch==1.7.0
+pip install pyyaml=5.3.1
+pip install tqdm=4.45.0
+```
 
 ### Train
 
@@ -14,7 +19,7 @@ Data cache and models will be stored in the subdirectory "./output/eth/" by defa
 ```
 git clone https://github.com/Majiker/STAR.git
 cd STAR
-python trainval.py
+python trainval.py --test_set <dataset to evaluate> --start_test <epoch to start test>
 ```
 
 Configuration files are also created after the first run, arguments could be modified through configuration files or command line. 
@@ -28,7 +33,7 @@ The datasets are selected on arguments '--test_set'. Five datasets in ETH/UCY in
 This command is to train model for ETH-hotel and start test at epoch 10. For different dataset, change 'hotel' to other datasets named in the last section.
 
 ```
-python trainval.py --test_set hotel --start_test 10
+python trainval.py --test_set hotel --start_test 50
 ```
 
 During training, the model for Best FDE on the corresponding test dataset would be record.
