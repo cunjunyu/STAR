@@ -4,6 +4,8 @@ import torch.nn as nn
 from .star import STAR
 from .utils import *
 
+from tqdm import tqdm
+
 
 class processor(object):
     def __init__(self, args):
@@ -154,7 +156,7 @@ class processor(object):
         error_epoch, final_error_epoch = 0, 0,
         error_cnt_epoch, final_error_cnt_epoch = 1e-5, 1e-5
 
-        for batch in range(self.dataloader.testbatchnums):
+        for batch in tqdm(range(self.dataloader.testbatchnums)):
 
             inputs, batch_id = self.dataloader.get_test_batch(batch)
             inputs = tuple([torch.Tensor(i) for i in inputs])
