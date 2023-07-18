@@ -5,8 +5,8 @@ Code for [Spatio-Temporal Graph Transformer Networks for Pedestrian Trajectory P
 
 ```bash
 pip install numpy==1.18.1
-pip install torch==1.7.0
-pip install pyyaml=5.3.1
+pip install torch==1.7.0 == 1.12.0
+pip install pyyaml=5.3.1 == 6.0
 pip install tqdm=4.45.0
 ```
 
