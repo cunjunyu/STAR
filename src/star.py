@@ -294,7 +294,6 @@ class STAR(torch.nn.Module):
         self.dropout_prob = dropout_prob
         self.args = args
 
-        self.temporal_encoder_layer = TransformerEncoderLayer(d_model=32, nhead=8)
 
         emsize = 32  # embedding dimension
         nhid = 2048  # the dimension of the feedforward network model in TransformerEncoder
@@ -304,15 +303,20 @@ class STAR(torch.nn.Module):
 
         self.spatial_encoder_1 = TransformerModel(emsize, nhead, nhid, nlayers, dropout)
         self.spatial_encoder_2 = TransformerModel(emsize, nhead, nhid, nlayers, dropout)
-
+        """
+        舍弃无效的self.temporal_encoder_layer 后续直接添加 避免梯度为NONE
+        self.temporal_encoder_layer = TransformerEncoderLayer(d_model=32, nhead=8)
         self.temporal_encoder_1 = TransformerEncoder(self.temporal_encoder_layer, 1)
         self.temporal_encoder_2 = TransformerEncoder(self.temporal_encoder_layer, 1)
-
+        """
+        self.temporal_encoder_1 = TransformerEncoder(TransformerEncoderLayer(d_model=32, nhead=8), 1)
+        self.temporal_encoder_2 = TransformerEncoder(TransformerEncoderLayer(d_model=32, nhead=8), 1)
         # Linear layer to map input to embedding
         self.input_embedding_layer_temporal = nn.Linear(2, 32)
         self.input_embedding_layer_spatial = nn.Linear(2, 32)
 
         # Linear layer to output and fusion
+        # inplace-operation 问题点 最终显示该变量version变化，即需要version-7，但后续变量已经被修改了 成version——9
         self.output_layer = nn.Linear(48, 2)
         self.fusion_layer = nn.Linear(64, 32)
 
@@ -322,7 +326,8 @@ class STAR(torch.nn.Module):
         self.dropout_in2 = nn.Dropout(self.dropout_prob)
         """
         inplace
-        
+        ReLU uses its output for the gradient computation as defined here and as shown in this code snippet:
+        故而relu在使用时需要注意其 inplace为true或false true节省开销 但容易造成inplace operation
         """
     def get_st_ed(self, batch_num):
         """
@@ -451,21 +456,24 @@ class STAR(torch.nn.Module):
             # Input Embedding
             # 此处作用将输入的xy 2维坐标变量转换为32维向量，相应的先linear，后relu，而后dropout；此处无inplace=True问题，也无+=问题；
             if framenum == 0:
-                temporal_input_embedded = self.dropout_in(self.relu(self.input_embedding_layer_temporal(nodes_current)).clone())
+                temporal_input_embedded = self.dropout_in(self.relu(self.input_embedding_layer_temporal(nodes_current)))
             else:
-                # todo 此处发生异常，后续在此处显示了无法计算其梯度。所讨论的变量在这里或之后的任何地方被更改,
-                temporal_input_embedded = self.dropout_in(self.relu(self.input_embedding_layer_temporal(nodes_current)).clone())
-                # todo GM对应论文中的Graph Memory
-                #  在训练阶段，
-                #
+                # 当framenum=18时，相应的nodes——current为【19,140,2】
+                temporal_input_embedded = self.dropout_in(self.relu(self.input_embedding_layer_temporal(nodes_current)))
+                # GM对应论文中的Graph Memory
+                # todo 错误的是 【19,140,32】 即最后一轮的temporal——input-embedded，此处传完后version由0变成1，
+                #  故而此处改,由索引传递变量也是一个原位操作，会引起_version的变化,故而相应的使用.clone()完成修复
+                #  .clone()函数返回一个和源张量同shape、dtype和device的张量，与源张量不共享数据内存，但提供梯度的回溯。
+                #  故而相应的inplace-operation是在复制后的张量上进行，不会改变其值，但其后续产生的梯度仍然可以正常回传，故而避免了backward时找不到对应当时值可行计算梯度
+                temporal_input_embedded = temporal_input_embedded.clone()
                 temporal_input_embedded[:framenum] = GM[:framenum, node_index]
-            # todo 需要注意 temporal（nodes-current：经过基于obs观测帧的归一化）和spatial（node-abs基于全局的norm）输入的node序列数据经过不同的处理，
-            spatial_input_embedded_ = self.dropout_in2(self.relu(self.input_embedding_layer_spatial(node_abs)).clone())
-            # todo 数据流式处理，空间输入基于最新的一帧进行分析，过往的空间关系不考虑
+            # 需要注意 temporal（nodes-current：经过基于obs观测帧的归一化）和spatial（node-abs基于全局的norm）输入的node序列数据经过不同的处理，
+            spatial_input_embedded_ = self.dropout_in2(self.relu(self.input_embedding_layer_spatial(node_abs)))
+            # 数据流式处理，空间输入基于最新的一帧进行分析，过往的空间关系不考虑
             spatial_input_embedded = self.spatial_encoder_1(spatial_input_embedded_[-1].unsqueeze(1), nei_list)
 
             spatial_input_embedded = spatial_input_embedded.permute(1, 0, 2)[-1]
-            # todo 时间输入基于完整的截止当前帧的数据（但是其中只有最新帧的数据是输入的，最新帧往前的数据是基于过往的预测结果的，而不是原始的结果）输出会重构所有帧数据，但只取最后一帧
+            # 时间输入基于完整的截止当前帧的数据（但是其中只有最新帧的数据是输入的，最新帧往前的数据是基于过往的预测结果的，而不是原始的结果）输出会重构所有帧数据，但只取最后一帧
             temporal_input_embedded_last = self.temporal_encoder_1(temporal_input_embedded)[-1]
             # 取temporal-input-embedded初始到倒数第二个数据，此处倒数第一个数据经过encoder后被重构！！
             temporal_input_embedded = temporal_input_embedded[:-1]
@@ -481,9 +489,55 @@ class STAR(torch.nn.Module):
             # 添加噪声
             noise_to_cat = noise.repeat(temporal_input_embedded.shape[0], 1)
             temporal_input_embedded_wnoise = torch.cat((temporal_input_embedded, noise_to_cat), dim=1)
+            # print("self.output_layer.weight_before", str(self.output_layer.weight._version))
             outputs_current = self.output_layer(temporal_input_embedded_wnoise)
+            # outputs_current = nn.functional.linear(temporal_input_embedded_wnoise,self.output_layer.weight.clone(),self.output_layer.bias)
             # 回传 outputs：相应的将预测结果传回，在预测新的一帧时运用，GM则回传中间特征层的数据，每次都只回传最新帧
+            # print("self.output_layer.weight_after",str(self.output_layer.weight._version))
             outputs[framenum, node_index] = outputs_current
+            # todo是否是因为此处还未backwardtemporal_input_embedded，而GM的值就已经改变，而使得对应的值也被变了
             GM[framenum, node_index] = temporal_input_embedded
 
         return outputs
+
+"""
+舍弃无用参数赋值类
+class ModifiableModule(nn.Module):
+    def params(self):
+        return [p for _,p in self.named_params()]
+
+    def named_leaves(self):
+        #获取叶子节点的参数
+        return [self.get_inner_loop_parameter_dict(self.net.named_parameters())]
+
+    def named_submodules(self):
+        #  获取子模块  此处子模块的获取应该是一层一层的  name_children ：只获取一层，name_modules:获取所有的子模块
+        # 但相比self.net。state——dict（）似乎少了一些 ？'spatial_encoder_1.transformer_encoder.layers.0.self_attn.in_proj_weight'
+        # return [(name, module) for name, module in self.named_modules() if len(list(module.modules())) == 1]
+        return self.named_children()
+
+    def named_params(self):
+        subparams = []
+        for name,mod in self.named_children():
+            for subname, param in mod.named_params():
+                subparams.append((name+'.'+subname,param))
+        return self.named_leaves()+subparams
+
+    def set_param(self,curr_mod,name,param):
+        if '.' in name:
+            n = name.split('.')
+            module_name = n[0]
+            rest = '.'.join(n[1:])
+            for name,mod in curr_mod.named_children():
+                if module_name == name:
+                    mod.set_param(mod,rest,param)
+                    break
+        else:
+            setattr(curr_mod,name,param)
+
+    def copy(self,other,same_var=False):
+        for name, param in other.named_parameters():
+            if not same_var:
+                param = V(param.data.clone(),requires_grad=True)
+            self.set_param(other,name,param)
+"""

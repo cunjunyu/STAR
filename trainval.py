@@ -32,8 +32,7 @@ def get_parser():
     parser.add_argument('--save_base_dir', default='./output/', help='Directory for saving caches and models.')
     parser.add_argument('--phase', default='train', help='Set this value to \'train\' or \'test\'')
     parser.add_argument('--train_model', default='star', help='Your model name')
-    parser.add_argument('--load_model', default=None, type=str, help="load pretrained model for test or training,"
-                                                                     "需要的时候相应传入str，会组成model_str进行后续计算")
+    parser.add_argument('--load_model', default=None, type=str, help="load pretrained model for test or training, 需要的时候相应传入str，会组成model_str进行后续计算")
     parser.add_argument('--model', default='star.STAR')
     parser.add_argument('--seq_length', default=20, type=int)
     parser.add_argument('--obs_length', default=8, type=int,help='注意test时，是否可以变换，以及不同的数据集也会改')
@@ -53,7 +52,12 @@ def get_parser():
     parser.add_argument('--neighbor_thred', default=10, type=int)
     parser.add_argument('--learning_rate', default=0.0015, type=float)
     parser.add_argument('--clip', default=1, type=int)
-
+    parser.add_argument('--second_order', type=str, default="False", help='Dropout_rate_value')
+    parser.add_argument('--first_order_to_second_order_epoch', type=int, default=-1, help='maml改进')
+    parser.add_argument('--task_learning_rate', default=0.0015, type=float, help='内循环学习率')
+    parser.add_argument('--device', type=int, default=3, help='GPU选择')
+    parser.add_argument('--batch_around_ped_meta', default=256, type=int, help='meta一个batch所应该包含的行人数，可以调节一下分析')
+    parser.add_argument('--query_sample_num', default=4, type=int,help='每个数据集中的support采集对应几个query')
     return parser
 
 
@@ -98,7 +102,7 @@ def save_arg(args):
 
 if __name__ == '__main__':
     # 开启异常检测 检测完成 找到错误后 可关闭
-    # torch.autograd.set_detect_anomaly(True)
+    #torch.autograd.set_detect_anomaly(True)
     parser = get_parser()
     p = parser.parse_args()
 
@@ -110,8 +114,8 @@ if __name__ == '__main__':
         save_arg(p)
     # 首次运行文件时，无配置的yaml文件则会运行save-arg保存默认参数，而后续的实现则是命令行参数和默认参数的结合分析
     args = load_arg(p)
-
-    torch.cuda.set_device(3)
+    device = args.device
+    torch.cuda.set_device(device)
 
     trainer = processor(args)
 

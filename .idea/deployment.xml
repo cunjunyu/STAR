@@ -9,6 +9,20 @@
           </mappings>
         </serverdata>
       </paths>
+      <paths name="root@211.103.167.86:20420 password">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/workspace/trajectron/STAR" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
+      <paths name="root@211.103.167.86:20420 password (1)">
+        <serverdata>
+          <mappings>
+            <mapping deploy="/workspace/trajectron/STAR" local="$PROJECT_DIR$" />
+          </mappings>
+        </serverdata>
+      </paths>
     </serverData>
     <option name="myAutoUpload" value="ALWAYS" />
   </component>

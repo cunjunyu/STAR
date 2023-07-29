@@ -18,6 +18,7 @@ class Trajectory_Dataloader():
     def __init__(self, args):
 
         self.args = args
+        # self.log_file_batch_pednum = open(os.path.join(self.args.model_dir, 'meta_batch_pednum.txt'), 'a+')
         if self.args.dataset == 'eth5':
 
             self.data_dirs = ['./data/eth/univ', './data/eth/hotel',
@@ -55,6 +56,11 @@ class Trajectory_Dataloader():
         self.test_data_file = os.path.join(self.args.save_dir, "test_trajectories.cpkl")
         self.train_batch_cache = os.path.join(self.args.save_dir, "train_batch_cache.cpkl")
         self.test_batch_cache = os.path.join(self.args.save_dir, "test_batch_cache.cpkl")
+        # -----meta-----------
+        self.train_seti_batch_cache = os.path.join(self.args.save_dir,"train_seti_batch_cache.cpkl")
+        self.test_seti_batch_cache = os.path.join(self.args.save_dir,"test_seti_batch_cache.cpkl")
+        self.train_meta_batch_cache = os.path.join(self.args.save_dir, "train_meta_batch_cache.cpkl")
+        self.test_meta_batch_cache = os.path.join(self.args.save_dir, "test_meta_batch_cache.cpkl")
         # todo 此处需要添加代码保存路径，保存新的数据处理的结果
 
         print("Creating pre-processed data from raw data.")
@@ -63,21 +69,42 @@ class Trajectory_Dataloader():
         self.traject_preprocess('test')
         print("Done.")
 
-        # Load the processed data from the pickle file
-        print("Preparing data batches.")
+        # Load the processed origin data from the pickle file （原始非meta）
+        print("Preparing origin data batches.")
         if not (os.path.exists(self.train_batch_cache)):
             self.frameped_dict, self.pedtraject_dict = self.load_dict(self.train_data_file)
             self.dataPreprocess('train')
+        # self.trainbatch, self.trainbatchnums, _, _ = self.load_cache(self.train_batch_cache)
+        # print('Total number of training batches:', self.trainbatchnums)
         if not (os.path.exists(self.test_batch_cache)):
             self.test_frameped_dict, self.test_pedtraject_dict = self.load_dict(self.test_data_file)
             self.dataPreprocess('test')
-
-        self.trainbatch, self.trainbatchnums, _, _ = self.load_cache(self.train_batch_cache)
         self.testbatch, self.testbatchnums, _, _ = self.load_cache(self.test_batch_cache)
-        print("Done.")
-
-        print('Total number of training batches:', self.trainbatchnums)
         print('Total number of test batches:', self.testbatchnums)
+
+        # Load the meta-processed data from the pickle file
+        print("Preparing seti data batches.")
+        if not (os.path.exists(self.train_seti_batch_cache)):
+            self.frameped_dict,self.pedtraject_dict = self.load_dict(self.train_data_file)
+            self.dataPreprocess_meta('train')
+        if not (os.path.exists(self.test_seti_batch_cache)):
+            self.test_frameped_dict,self.test_pedtraject_dict = self.load_dict(self.test_data_file)
+            self.dataPreprocess_meta('test')
+
+        print("Preparing meta task data batches.")
+        if not (os.path.exists(self.train_meta_batch_cache)):
+            print("process train meta cpkl")
+            self.batchdata_meta, self.batchnums_meta, _, _ = self.load_cache(self.train_seti_batch_cache)
+            self.meta_task(setname="train")
+        self.train_batch_task = self.load_cache(self.train_meta_batch_cache)
+        '''
+        后续添加测试数据处理
+        if not (os.path.exists(self.test_meta_batch_cache)):
+            self.batchdata_meta, self.batchnums_meta, _, _ = self.load_cache(self.test_seti_batch_cache)
+            self.meta_task(setname="test")
+        self.test_batch_task = self.load_cache(self.train_meta_batch_cache)
+        '''
+        print('Total number of training task batches:', len(self.train_batch_task))
 
         self.reset_batch_pointer(set='train', valid=False)
         self.reset_batch_pointer(set='train', valid=True)
@@ -160,7 +187,7 @@ class Trajectory_Dataloader():
     def get_data_index(self, data_dict, setname, ifshuffle=True):
         '''
         Get the dataset sampling index.
-        data-dict：集合，包含了多个场景，每个场景是一个时间序列，其存储了每个场景从第一帧到最后一帧（固定间隔）的行人数量
+        data-dict：集合，包含了多个场景，每个场景是一个时间序列，其存储了每个场景从第一帧到最后一帧（固定间隔）的行人标号
         setname：train/test
         其主要作用是返回：所有帧 ID 和它们所属的数据集 ID、数字化后的帧 ID 存储在一个 3 x N 的 NumPy 数组 data_index 中
         '''
@@ -242,6 +269,276 @@ class Trajectory_Dataloader():
 
         f = open(cachefile, "wb")
         pickle.dump((trainbatch, trainbatchnums, valbatch, valbatchnums), f, protocol=2)
+        f.close()
+
+    def dataPreprocess_meta(self,setname):
+        """
+        拆分各自数据集形成得到各自的windows窗口，打包形成各自的batch
+        组合成task
+        """
+
+        if setname == 'train':
+            val_fraction=0
+            frameped_dict = self.frameped_dict
+            pedtraject_dict = self.pedtraject_dict
+            cachefile = self.train_seti_batch_cache
+
+        else:
+            # todo 'Trajectory_Dataloader' object has no attribute 'test_frameped_dict'
+            val_fraction = 0
+            frameped_dict = self.test_frameped_dict
+            pedtraject_dict = self.test_pedtraject_dict
+            cachefile = self.test_seti_batch_cache
+
+        if setname != 'train':
+            # 数据集内部各自shuffle
+            shuffle = False
+        else:
+            shuffle = True
+        # 运用for循环，分别处理单个数据集
+        trainbatch_meta = []
+        valbatch_meta=[]
+        trainbatchnums_meta = []
+        valbatchnums_meta = []
+        for seti, seti_frameped_dict in enumerate(frameped_dict):
+            # 提取出单个数据集
+            trainbatch_meta.append({})
+            valbatch_meta.append({})
+            data_index = self.get_data_index_meta(seti,seti_frameped_dict,setname,ifshuffle=shuffle)
+            val_index = data_index[:, :int(data_index.shape[1] * val_fraction)]
+            train_index = data_index[:, (int(data_index.shape[1] * val_fraction) + 1):]
+            trainbatch = self.get_seq_from_index_balance_meta(seti , seti_frameped_dict, pedtraject_dict, train_index, setname)
+            valbatch = self.get_seq_from_index_balance_meta(seti ,seti_frameped_dict, pedtraject_dict, val_index, setname)
+            trainbatchnums = len(trainbatch)
+            valbatchnums = len(valbatch)
+            # list（场景号） - list（windows号） -tuple （）
+            trainbatch_meta[seti]= trainbatch
+            valbatch_meta[seti] = valbatch
+            trainbatchnums_meta.append(trainbatchnums)
+            valbatchnums_meta.append(valbatchnums)
+        # 动态的迭代选取support和query组成task格式为（task-num，2）（0-support，1-query）
+
+        f = open(cachefile, "wb")
+        pickle.dump((trainbatch_meta, trainbatchnums_meta, valbatch_meta, valbatchnums_meta), f, protocol=2)
+        f.close()
+
+    def get_data_index_meta(self, seti, data_dict, setname, ifshuffle=True):
+        """
+        输入的data-dict是个list，只有单个场景的数据，时间序列，其存储了每个场景从第一帧到最后一帧（固定间隔）的行人标号
+        setname：train/test
+
+        """
+        set_id = []
+        frame_id_in_set = []
+        total_frame = 0
+        frames = sorted(data_dict)
+        # 此处maxframe如果是为了使得每个帧都存在未来的20帧，则相应的应该乘以间隔 即 self.args.seq_length*self.skip[seti]
+        maxframe = max(frames) - self.args.seq_length
+        # 去掉不足一个序列长度的帧 ID
+        frames = [x for x in frames if not x > maxframe]
+        total_frame += len(frames)
+        # 添加一行 标记每个数据所属的数据集
+        set_id.extend(list(seti for i in range(len(frames))))
+        frame_id_in_set.extend(list(frames[i] for i in range(len(frames))))
+        all_frame_id_list = list(i for i in range(total_frame))
+        # data-index 格式 （各自数据集中的实际帧号，所属数据集编号，全局数字化后值）
+        data_index = np.concatenate((np.array([frame_id_in_set], dtype=int), np.array([set_id], dtype=int),
+                                     np.array([all_frame_id_list], dtype=int)), 0)
+        if ifshuffle:
+            random.Random().shuffle(all_frame_id_list)
+        data_index = data_index[:, all_frame_id_list]
+        # to make full use of the data
+        # ，函数将 data_index 数组的前 batch_size 列复制到数组的末尾，以增加训练集的大小
+        if setname == 'train':
+            data_index = np.append(data_index, data_index[:, :self.args.batch_size], 1)
+        return data_index
+
+    def get_seq_from_index_balance_meta(self, seti, seti_frameped_dict, pedtraject_dict, data_index, setname):
+        """
+        各个数据集自身形成batch！
+        """
+        batch_data_mass = []
+        batch_data = []
+        Batch_id = []
+        temp = self.args.batch_around_ped_meta
+        if setname == 'train':
+            skip = self.trainskip
+        else:
+            skip = self.testskip
+
+        ped_cnt = 0
+        last_frame = 0
+        # 全局处理 混合所有train的帧 形成的windows
+        for i in range(data_index.shape[1]):
+            if i % 100 == 0:
+                print(i, '/', data_index.shape[1])
+            cur_frame, cur_set, _ = data_index[:, i]
+            framestart_pedi = set(seti_frameped_dict[cur_frame])
+            # 计算并获取对应起始帧（子轨迹）的结束帧，由于当前的子轨迹的结束帧可能会超过数据集的范围，因此使用try-expect语句块处理这种情况
+            try:
+                frameend_pedi = set(seti_frameped_dict[cur_frame + self.args.seq_length * skip[cur_set]])
+            except:
+                continue
+            present_pedi = framestart_pedi | frameend_pedi
+            # 如果起始帧与结束帧没有重复的行人id，则抛弃该子轨迹
+            if (framestart_pedi & frameend_pedi).__len__() == 0:
+                continue
+            traject = ()
+            IFfull = []
+            """
+            针对由起始帧和结束帧确定的窗口序列以及行人并集，遍历行人，找到该行人在起始帧与结束帧之间存在的片段；若正好全程存在，则iffull为true，
+            若有空缺，则iffull为False；ifexistobs标识obs帧是否存在，并删去太短的片段（小于5）；而后去除帧号，只保留这些行人的xy坐标；添加到traject中
+            而后将滤除后的行人轨迹数据保留并拼接；batch-pednum为相应的不断累计不同时间窗口轨迹数据的总值，
+            """
+            for ped in present_pedi:
+                # cur-trajec：该行人对应的子轨迹数据（可能是完整的20，也可能小于20） iffull指示其是否满，ifexistobs指示其是否存在我们要求的观测帧
+                cur_trajec, iffull, ifexistobs = self.find_trajectory_fragment(pedtraject_dict[cur_set][ped], cur_frame,
+                                                                               self.args.seq_length, skip[cur_set])
+                # 对于每个子轨迹，如果它的长度小于阈值或者该子轨迹中的一些帧没有数据，则忽略该子轨迹；否则加进cur_trajec
+                if len(cur_trajec) == 0:
+                    continue
+                if ifexistobs == False:
+                    #  Just ignore trajectories if their data don't exsist at the last obversed time step (easy for data shift)
+                    continue
+                if sum(cur_trajec[:, 0] > 0) < 5:
+                    # filter trajectories have too few frame data
+                    continue
+                    # 自取cur-trajec的后两列（xy）组成（20,1,2）的向量，此处不直接用（20，2）是为了后续在第二维拼接不同的行人数据
+                cur_trajec = (cur_trajec[:, 1:].reshape(-1, 1, 2),)
+                traject = traject.__add__(cur_trajec)
+                IFfull.append(iffull)
+            if traject.__len__() < 1:
+                continue
+            if sum(IFfull) < 1:
+                continue
+            # 按照第二个维度进行拼接，即将同一个windows中行人数据拼接在一起
+            traject_batch = np.concatenate(traject, 1)
+            # 基于后续叠加各个windows中的行人数据
+            batch_pednum = sum([i.shape[1] for i in batch_data]) + traject_batch.shape[1]
+            # 该windows中的行人数量
+            cur_pednum = traject_batch.shape[1]
+            ped_cnt += cur_pednum
+            batch_id = (cur_set, cur_frame,)
+            #  todo 还未测试
+            """
+            如果以当前数据集以及相应的预测帧起始的窗口中包含超过512个行人的轨迹，则将其进行拆分为两个batch，如果处于256和512之间，
+            将其打包成为一个batch；如果小于256，则相应的累加其他时间窗口的轨迹数据，直到batch里的行人数大于256,将其打包为一个batch             
+            """
+            # todo 分数据集提取保存！！[set,batch-data]
+            """测试完成 关闭
+            if i % 10 == 0:
+                self.log_file_batch_pednum.close()
+                self.log_file_batch_pednum = open(os.path.join(self.args.model_dir, 'meta_batch_pednum.txt'), 'a+')
+            """
+
+            if cur_pednum >= self.args.batch_around_ped_meta * 2:
+                # too many people in current scene
+                # split the scene into two batches
+                # self.log_file_batch_pednum.write(str(seti) + '----' + str(cur_pednum) + '\n')
+                ind = traject_batch[self.args.obs_length - 1].argsort(0)
+                cur_batch_data, cur_Batch_id = [], []
+                Seq_batchs = [traject_batch[:, ind[:cur_pednum // 2, 0]],
+                              traject_batch[:, ind[cur_pednum // 2:, 0]]]
+                for sb in Seq_batchs:
+                    cur_batch_data.append(sb)
+                    cur_Batch_id.append(batch_id)
+                    cur_batch_data = self.massup_batch(cur_batch_data)
+                    batch_data_mass.append((cur_batch_data, cur_Batch_id,))
+                    cur_batch_data = []
+                    cur_Batch_id = []
+
+                last_frame = i
+            elif cur_pednum >= self.args.batch_around_ped_meta:
+                # self.log_file_batch_pednum.write(str(seti) + '----' + str(cur_pednum) + '\n')
+                # good pedestrian numbers
+                cur_batch_data, cur_Batch_id = [], []
+                cur_batch_data.append(traject_batch)
+                cur_Batch_id.append(batch_id)
+                cur_batch_data = self.massup_batch(cur_batch_data)
+                batch_data_mass.append((cur_batch_data, cur_Batch_id,))
+
+                last_frame = i
+            else:  # less pedestrian numbers <64
+                # accumulate multiple framedata into a batch
+                if batch_pednum > self.args.batch_around_ped_meta:
+                    #self.log_file_batch_pednum.write(str(seti) + '----' + str(batch_pednum) +  '\n')
+                    # enough people in the scene
+                    batch_data.append(traject_batch)
+                    Batch_id.append(batch_id)
+                    """
+                    输入：多个windows的数据 （windows-num，20，windows-ped，2）
+                    batch_data_mass：多个（batch_data, Batch_id）
+                    batch_data：(nodes_batch_b, seq_list_b, nei_list_b, nei_num_b, batch_pednum)
+
+                    nodes_batch_b：(seq_length, num_Peds，2) 每帧，每个行人 xy坐标
+                    seq_list_b:(seq_length, num_Peds)（20，257）值为01,1表示该行人在该帧有数据
+                    nei_list_b：(seq_length, num_Peds，num_Peds) （20,257，257） 值为01 以空间距离为基准 分析邻接关系
+                    nei_num_b：(seq_length, num_Peds）（20,257）表示每帧下每个行人的邻居数量
+                    batch_pednum：list 表示该batch下每个时间窗口中的行人数量
+                    """
+                    batch_data = self.massup_batch(batch_data)
+                    batch_data_mass.append((batch_data, Batch_id,))
+
+                    last_frame = i
+                    batch_data = []
+                    Batch_id = []
+                else:
+                    # todo batch问题 缺失轨迹预测问题 meta-learning task设计问题
+                    """
+                     一般都要经过累加，相应的过往的batch处理是选择固定的多个20s的场景数据，而此处区别则是每个batch中包含的20s场景数是不同的
+                     其以该batch中的人（轨迹）数量为准，直到累加超过阈值；（好处可能是解决了单个轨迹处理耗时慢的问题，同样解决了部分batch数据轨迹太少）
+                     需要注意的是 在meta原本思路中，batch的定义与此处不同，batch以task为基础，每个task只需要一条support和一条query，其皆由单个20s场景组成
+                     但很可能存在，即相应的20s内无轨迹，或则只有几条行人轨迹可用；故而可以先进行叠加以64-128个行人轨迹数先组成batch，以此batch为support和query                     
+                     （问题二 源代码对应的batch的traj中部分行人数据未全程存在，该部分如何预测）   
+                    """
+                    batch_data.append(traject_batch)
+                    Batch_id.append(batch_id)
+        # todo 需要分析针对于不足batch_pednum的最后几个windows的情况，如果是train，则直接舍弃最后的数据，如果是test，而且相应的不是最后一帧，
+        #  即没有处理完，而且batch-pednum中行人数大于1，则对其进行相应的batch处理，加到数据集中
+        if last_frame < data_index.shape[1] - 1 and setname == 'test' and batch_pednum > 1:
+            # self.log_file_batch_pednum.write(str(seti) + '----' + str(batch_pednum) + '\n')
+            batch_data = self.massup_batch(batch_data)
+            batch_data_mass.append((batch_data, Batch_id,))
+        self.args.batch_around_ped = temp
+        return batch_data_mass
+
+    def meta_task(self,setname):
+        """
+        1-组合各个数据集的batch数据，循环遍历数据集0-6，针对每个数据集中的每个batch，重复四次选取，support一样，query从其他场景中随机挑选，
+        两次随机，随机选数据集号，而后再随机选数据集号下对应的batch，从而组合成一个tuple。
+        2-反复如此操作，得到最终的task列表
+        3-打乱task列表后，依顺序4个组，组成batch。
+
+        todo 后续考虑：
+        1-此处划分的数据集，有多个可能是同属于一个场景，在这先认为一样，后续引入相应的场景序号，场景序号下视频序号
+        2-task池做大，相应的阈值可设256，不影响。
+        3-针对test？再说吧,如何形成batch？
+        """
+        if setname == 'train':
+
+            cachefile = self.train_meta_batch_cache
+            task_list = []
+            for seti, seti_batch_num in enumerate(self.batchnums_meta):
+                query_seti_id = [i for i in range(len(self.batchnums_meta))]
+                query_seti_id.remove(seti)
+                for batch_id in range(seti_batch_num):
+                    support_set = self.batchdata_meta[seti][batch_id]
+                    for query_i in range(self.args.query_sample_num):
+                        random_query_seti = random.choice(query_seti_id)
+                        random_query_seti_batch = random.randint(0, self.batchnums_meta[random_query_seti] - 1)
+                        query_set = self.batchdata_meta[random_query_seti][random_query_seti_batch]
+                        task_list.append((support_set, query_set,))
+            # 最开始是按顺序获取task，获取完毕后打乱task
+            random.shuffle(task_list)
+            batch_task = [task_list[i:i + 4] for i in range(0, len(task_list), 4)]
+            print("Finsh task batch" + str(setname))
+        else:
+            # todo 有待下一步开发
+            self.batchdata_meta, self.batchnums_meta, _, _ = self.load_cache(self.test_seti_batch_cache)
+            cachefile = self.test_meta_batch_cache
+
+        f = open(cachefile, "wb")
+        pickle.dump(batch_task, f, protocol=2)
         f.close()
 
     def get_seq_from_index_balance(self, frameped_dict, pedtraject_dict, data_index, setname):
@@ -395,7 +692,6 @@ class Trajectory_Dataloader():
             batch_data_mass.append((batch_data, Batch_id,))
         self.args.batch_around_ped = temp
         return batch_data_mass
-
 
     def find_trajectory_fragment(self, trajectory, startframe, seq_length, skip):
         '''
