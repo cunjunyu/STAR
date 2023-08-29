@@ -4,9 +4,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-
 from .multi_attention_forward import multi_head_attention_forward
-
+from .utils import Normal,MLP2
 
 def get_noise(shape, noise_type):
     if noise_type == "gaussian":
@@ -204,16 +203,29 @@ class TransformerEncoderLayer(nn.Module):
         Shape:
             see the docs in Transformer class.
         """
+        # Multi Multihead Attention
         src2, attn = self.self_attn(src, src, src, attn_mask=src_mask,
                                     key_padding_mask=src_key_padding_mask)
+        # Add and norm
         src = src + self.dropout1(src2)
+        '''
+        nn.LayerNorm () layer_norm = nn.LayerNorm(normalized_shape, eps, elementwise_affine)
+        此处normalized_shape：表示输入张量的形状，可以是一个整数或一个元组。如果输入张量的形状是 (batch_size, num_features)，
+        则 normalized_shape 应为 num_features,此处为32，（seq，batch-size，num-features），seq和batch-size都是可以变化的，
+        此处的归一化应该值得是对于batch中的每一个样本，seq中的每一个时刻，对num-feature做归一化；而且此处针对的是时序，不考虑空间关系
+        此处batch-size只为充分利用GPU并行计算各个ped行人序列
+        batch-norm此处也不应该针对seq，应该是seq的每个时刻，每个feature，以batch-size做归一化；
+        那此处这就相当于基于空间位置（2-32）归一化？但前述已经有过了，或许特征变换后不该怎么理解。
+        temporal:(seq,batch-size,num-feature)  spatial:(batch-size,1,num-feature)
+        '''
         src = self.norm1(src)
-
+        # LayerNorm -- BatchNorm 改进
+        # Feed Forward
         if hasattr(self, "activation"):
             src2 = self.linear2(self.dropout(self.activation(self.linear1(src))))
         else:  # for backward compatibility
             src2 = self.linear2(self.dropout(F.relu(self.linear1(src))))
-
+        # Add and norm
         src = src + self.dropout2(src2)
         src = self.norm2(src)
         return src, attn
@@ -293,7 +305,8 @@ class STAR(torch.nn.Module):
         self.output_size = 2
         self.dropout_prob = dropout_prob
         self.args = args
-
+        self.mean = []
+        self.var = []
 
         emsize = 32  # embedding dimension
         nhid = 2048  # the dimension of the feedforward network model in TransformerEncoder
@@ -329,6 +342,7 @@ class STAR(torch.nn.Module):
         ReLU uses its output for the gradient computation as defined here and as shown in this code snippet:
         故而relu在使用时需要注意其 inplace为true或false true节省开销 但容易造成inplace operation
         """
+
     def get_st_ed(self, batch_num):
         """
 
@@ -409,8 +423,8 @@ class STAR(torch.nn.Module):
 
         return node_abs.permute(1, 0, 2)
 
-    def forward(self, inputs, iftest=False):
-
+    def forward(self, inputs, stage, mean_list, var_list, iftest=False,ifmixup = False):
+        # ifmeta-test用来表征相应的是否需要进行注入操作，而相应的mean-list以及var——list则表示的是对应的不同域的特征均值和方差
         nodes_abs, nodes_norm, shift_value, seq_list, nei_lists, nei_num, batch_pednum = inputs
         num_Ped = nodes_norm.shape[1]
 
@@ -422,6 +436,7 @@ class STAR(torch.nn.Module):
         for framenum in range(self.args.seq_length - 1):
 
             if framenum >= self.args.obs_length and iftest:
+                # iftest 标志测试阶段，测试数据只有过往的8帧，后续生成的应该全部都是 基于这8帧预测得到的
                 # 提取从起始到观测帧都存在的行人，以便后续预测
                 node_index = self.get_node_index(seq_list[:self.args.obs_length])
                 updated_batch_pednum = self.update_batch_pednum(batch_pednum, node_index)
@@ -432,8 +447,8 @@ class STAR(torch.nn.Module):
                 node_abs_base = nodes_abs[:self.args.obs_length, node_index]
                 # 将经过归一化的outputs数据返回至未归一化效果
                 node_abs_pred = shift_value[self.args.obs_length:framenum + 1, node_index] + outputs[
-                                                                                           self.args.obs_length - 1:framenum,
-                                                                                           node_index]
+                                                                                             self.args.obs_length - 1:framenum,
+                                                                                             node_index]
                 node_abs = torch.cat((node_abs_base, node_abs_pred), dim=0)
                 # We normalize the absolute coordinates using the mean value in the same scene
                 node_abs = self.mean_normalize_abs_input(node_abs, st_ed)
@@ -485,7 +500,32 @@ class STAR(torch.nn.Module):
             spatial_input_embedded = spatial_input_embedded.permute(1, 0, 2)
             # 将经过spatial_encoder_2的数据与原先的temporal_input_embedded（初始到倒数第二个）进行拼接：正好又拼接成完整的序列
             temporal_input_embedded = torch.cat((temporal_input_embedded, spatial_input_embedded), dim=0)
-            temporal_input_embedded = self.temporal_encoder_2(temporal_input_embedded)[-1]
+            temporal_input_embedded = self.temporal_encoder_2(temporal_input_embedded)[-1]  # 此处后从seq.228.32变为228.32
+            #  在此处添加对应的BN或则对应的attention机制 temporal-input-embedded为(batch，feature）=》均值/方差(1，feature）
+            # 根据beta分布生成权重 将来当执行MixUp时,就可以通过线性组合sample1和输入features,实现特征空间中的混合mixup
+            if ifmixup:
+                if stage == 'query' and iftest == False:
+                    # meta-test阶段 均匀分布
+                    lam = np.random.beta(1., 1.)
+                    from torch.distributions.normal import Normal
+                    # todo 先单域注入后续再改成多域注入
+                    # mean_list[framenum] 为32 Distri1为正太分布对象 sample1抽样对象为 （228.32） 而后混合特征
+                    Distri1 = Normal(mean_list[framenum], var_list[framenum])
+                    sample1 = Distri1.sample([temporal_input_embedded.size(0), ])
+                    # lam产生的值会不会太大 或则说特征的混合需要换一下 0.96较大
+                    # todo 问题 特征混合应该不在这个地方 或则说特征混合的时间跨度应该只在 前8s ？ 此处特征已经完全
+                    temporal_input_embedded = lam * temporal_input_embedded + (1 - lam) * sample1
+                elif stage == 'support' and iftest == False:
+                    # meta-train阶段
+                    mean = temporal_input_embedded.mean(dim=0)
+                    var = temporal_input_embedded.var(dim=0)
+                    self.mean.append(mean)
+                    self.var.append(var)
+                    temporal_input_embedded = temporal_input_embedded
+                elif iftest == True:
+                    temporal_input_embedded = temporal_input_embedded
+            else:
+                temporal_input_embedded = temporal_input_embedded
             # 添加噪声
             noise_to_cat = noise.repeat(temporal_input_embedded.shape[0], 1)
             temporal_input_embedded_wnoise = torch.cat((temporal_input_embedded, noise_to_cat), dim=1)
@@ -497,8 +537,279 @@ class STAR(torch.nn.Module):
             outputs[framenum, node_index] = outputs_current
             # todo是否是因为此处还未backwardtemporal_input_embedded，而GM的值就已经改变，而使得对应的值也被变了
             GM[framenum, node_index] = temporal_input_embedded
+        # self.mean 00-18 共19个
+        return outputs, self.mean, self.var
 
-        return outputs
+class NEW_STAR(torch.nn.Module):
+
+    def __init__(self, args, dropout_prob=0):
+        super(STAR, self).__init__()
+
+        # set parameters for network architecture
+        self.embedding_size = [32]
+        self.output_size = 2
+        self.dropout_prob = dropout_prob
+        self.args = args
+        self.mean = []
+        self.var = []
+
+        emsize = 32  # embedding dimension
+        nhid = 2048  # the dimension of the feedforward network model in TransformerEncoder
+        nlayers = 2  # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
+        nhead = 8  # the number of heads in the multihead-attention models
+        dropout = 0.1  # the dropout value
+
+        self.spatial_encoder_1 = TransformerModel(emsize, nhead, nhid, nlayers, dropout)
+        self.spatial_encoder_2 = TransformerModel(emsize, nhead, nhid, nlayers, dropout)
+        """
+        舍弃无效的self.temporal_encoder_layer 后续直接添加 避免梯度为NONE
+        self.temporal_encoder_layer = TransformerEncoderLayer(d_model=32, nhead=8)
+        self.temporal_encoder_1 = TransformerEncoder(self.temporal_encoder_layer, 1)
+        self.temporal_encoder_2 = TransformerEncoder(self.temporal_encoder_layer, 1)
+        """
+        self.temporal_encoder_1 = TransformerEncoder(TransformerEncoderLayer(d_model=32, nhead=8), 1)
+        self.temporal_encoder_2 = TransformerEncoder(TransformerEncoderLayer(d_model=32, nhead=8), 1)
+        # Linear layer to map input to embedding
+        self.input_embedding_layer_temporal = nn.Linear(2, 32)
+        self.input_embedding_layer_spatial = nn.Linear(2, 32)
+
+        # Linear layer to output and fusion
+        # inplace-operation 问题点 最终显示该变量version变化，即需要version-7，但后续变量已经被修改了 成version——9
+        self.output_layer = nn.Linear(48, 2)
+        self.fusion_layer = nn.Linear(64, 32)
+        # ReLU and dropout init
+        self.relu = nn.ReLU()
+        self.dropout_in = nn.Dropout(self.dropout_prob)
+        self.dropout_in2 = nn.Dropout(self.dropout_prob)
+        # CVAE
+        self.encoder_past_layer = nn.Linear(8, 1)
+        # todo 可能是 维度需要注意设计
+        self.encoder_furture_layer = nn.Linear(11, 1)
+        self.out_mlp = MLP2(input_dim=64,hidden_dims=32,activation='relu')
+        self.qz_layer = nn.Linear(self.out_mlp.out_dim,2*self.args.zdim)
+        self.pz_layer = nn.Linear(self.embedding_size, 2 * self.args.zdim)
+        """
+        inplace
+        ReLU uses its output for the gradient computation as defined here and as shown in this code snippet:
+        故而relu在使用时需要注意其 inplace为true或false true节省开销 但容易造成inplace operation
+        """
+
+    def get_st_ed(self, batch_num):
+        """
+
+        :param batch_num: contains number of pedestrians in different scenes for a batch
+        :type batch_num: list
+        :return: st_ed: list of tuple contains start index and end index of pedestrians in different scenes
+        :rtype: list
+        """
+        cumsum = torch.cumsum(batch_num, dim=0)
+        st_ed = []
+        for idx in range(1, cumsum.shape[0]):
+            st_ed.append((int(cumsum[idx - 1]), int(cumsum[idx])))
+
+        st_ed.insert(0, (0, int(cumsum[0])))
+
+        return st_ed
+
+    def get_node_index(self, seq_list):
+        """
+
+        :param seq_list: mask indicates whether pedestrain exists
+        :type seq_list: numpy array [F, N], F: number of frames. N: Number of pedestrians (a mask to indicate whether
+                                                                                            the pedestrian exists)
+        :return: All the pedestrians who exist from the beginning to current frame
+        :rtype: numpy array
+        """
+        for idx, framenum in enumerate(seq_list):
+
+            if idx == 0:
+                node_indices = framenum > 0
+            else:
+                node_indices *= (framenum > 0)
+
+        return node_indices
+
+    def update_batch_pednum(self, batch_pednum, ped_list):
+        """
+
+        :param batch_pednum: batch_num: contains number of pedestrians in different scenes for a batch
+        :type list
+        :param ped_list: mask indicates whether the pedestrian exists through the time window to current frame
+        :type tensor
+        :return: batch_pednum: contains number of pedestrians in different scenes for a batch after removing pedestrian who disappeared
+        :rtype: list
+        """
+        updated_batch_pednum_ = copy.deepcopy(batch_pednum).cpu().numpy()
+        updated_batch_pednum = copy.deepcopy(batch_pednum)
+
+        cumsum = np.cumsum(updated_batch_pednum_)
+        new_ped = copy.deepcopy(ped_list).cpu().numpy()
+
+        for idx, num in enumerate(cumsum):
+            num = int(num)
+            if idx == 0:
+                updated_batch_pednum[idx] = len(np.where(new_ped[0:num] == 1)[0])
+            else:
+                updated_batch_pednum[idx] = len(np.where(new_ped[int(cumsum[idx - 1]):num] == 1)[0])
+
+        return updated_batch_pednum
+
+    def mean_normalize_abs_input(self, node_abs, st_ed):
+        """
+
+        :param node_abs: Absolute coordinates of pedestrians
+        :type Tensor
+        :param st_ed: list of tuple indicates the indices of pedestrians belonging to the same scene
+        :type List of tupule
+        :return: node_abs: Normalized absolute coordinates of pedestrians
+        :rtype: Tensor
+        """
+        node_abs = node_abs.permute(1, 0, 2)
+        for st, ed in st_ed:
+            mean_x = torch.mean(node_abs[st:ed, :, 0])
+            mean_y = torch.mean(node_abs[st:ed, :, 1])
+
+            node_abs[st:ed, :, 0] = (node_abs[st:ed, :, 0] - mean_x)
+            node_abs[st:ed, :, 1] = (node_abs[st:ed, :, 1] - mean_y)
+
+        return node_abs.permute(1, 0, 2)
+
+    def forward(self, inputs, stage, mean_list, var_list, iftest=False,ifmixup = False):
+        # 分析：最小破坏结构的做法即前8s的时间进行Encoder；而后相应的在Temporal Transformer处修改代码
+        # 这样前8s每个时刻点捕获到了空间关系，而后又有时间关系的捕捉 继而加入CVAE与Decoder架构
+
+        # ifmeta-test用来表征相应的是否需要进行注入操作，而相应的mean-list以及var——list则表示的是对应的不同域的特征均值和方差
+        nodes_abs, nodes_norm, shift_value, seq_list, nei_lists, nei_num, batch_pednum = inputs
+        num_Ped = nodes_norm.shape[1]
+        # 后续可能需要改shape的19为8（前8sencoder）不需要
+        # outputs = torch.zeros(nodes_norm.shape[0], num_Ped, 2).cuda()
+        GM = torch.zeros(nodes_norm.shape[0], num_Ped, 32).cuda()
+
+        # noise = get_noise((1, 16), 'gaussian')
+        #  todo temporal——transformer 将一个人轨迹截止当前frame时刻的数据输进去，而后相应的输出重构后的该人历史轨迹数据；
+        #   相当于重新编码了过去的轨迹，故而此处的encoder最后得到结果应该是【8，batch，hidden_dim】而后再将这8通过FC？转为1，
+        #   当做过去轨迹的特征，相应的特征混合也应该在此处进行混合 此前混合单个特征 无法反映特征所包含的信息
+        # encoder_var = 0
+        # 因为要用CVAE框架，那么过去与未来就都需要编码，相应的，此处则全部由循环编码过程完成，无上飞线，有GM线
+        for framenum in range(self.args.seq_length - 1):
+            # todo 需要注意的是add to history 只有在obs之后进行
+            # node-idx筛选出从起始到当前帧都存在的ped
+            node_index = self.get_node_index(seq_list[:framenum + 1])
+            nei_list = nei_lists[framenum, node_index, :]
+            nei_list = nei_list[:, node_index]
+            # 更新batch-pednum：去除消失的行人后batch中每个windows下的新的人数；仍然会随着frame的变换而变换
+            updated_batch_pednum = self.update_batch_pednum(batch_pednum, node_index)
+            # 依据updated-batch-pednum得出相应的每个windows中开始和结束的行人序列号，便于分开处理
+            st_ed = self.get_st_ed(updated_batch_pednum)
+            # 只取到framenum的数据
+            nodes_current = nodes_norm[:framenum + 1, node_index]
+            # We normalize the absolute coordinates using the mean value in the same scene
+            # 基于同一场景中的行人数据进行标准化，即运用该windows所有行人的平均xy坐标进行分析
+            node_abs = self.mean_normalize_abs_input(nodes_abs[:framenum + 1, node_index], st_ed)
+            # Input Embedding
+            # 此处作用将输入的xy 2维坐标变量转换为32维向量，相应的先linear，后relu，而后dropout；此处无inplace=True问题，也无+=问题；
+            if framenum == 0:
+                temporal_input_embedded = self.dropout_in(self.relu(self.input_embedding_layer_temporal(nodes_current)))
+            else:
+                # 当framenum=18时，相应的nodes——current为【19,140,2】
+                temporal_input_embedded = self.dropout_in(self.relu(self.input_embedding_layer_temporal(nodes_current)))
+                # GM对应论文中的Graph Memory
+                temporal_input_embedded = temporal_input_embedded.clone()
+                temporal_input_embedded[:framenum] = GM[:framenum, node_index]
+
+            # 需要注意 temporal（nodes-current：经过基于obs观测帧的归一化）和spatial（node-abs基于全局的norm）输入的node序列数据经过不同的处理，
+            spatial_input_embedded_ = self.dropout_in2(self.relu(self.input_embedding_layer_spatial(node_abs)))
+            # 数据流式处理，空间输入基于最新的一帧进行分析，过往的空间关系不考虑
+            spatial_input_embedded = self.spatial_encoder_1(spatial_input_embedded_[-1].unsqueeze(1), nei_list)
+
+            spatial_input_embedded = spatial_input_embedded.permute(1, 0, 2)[-1]
+            # 时间输入基于完整的截止当前帧的数据（但是其中只有最新帧的数据是输入的，最新帧往前的数据是基于过往的预测结果的，而不是原始的结果）输出会重构所有帧数据，但只取最后一帧
+            temporal_input_embedded_last = self.temporal_encoder_1(temporal_input_embedded)[-1]
+            # 取temporal-input-embedded初始到倒数第二个数据，此处倒数第一个数据经过encoder后被重构！！
+            temporal_input_embedded = temporal_input_embedded[:-1]
+            fusion_feat = torch.cat((temporal_input_embedded_last, spatial_input_embedded), dim=1)
+            fusion_feat = self.fusion_layer(fusion_feat)
+            # 经过第一次encoder后的最新帧数据都变了，对其拼接，输入spatial-encoder
+            spatial_input_embedded = self.spatial_encoder_2(fusion_feat.unsqueeze(1), nei_list)
+            spatial_input_embedded = spatial_input_embedded.permute(1, 0, 2)
+            # 将经过spatial_encoder_2的数据与原先的temporal_input_embedded（初始到倒数第二个）进行拼接：正好又拼接成完整的序列
+            temporal_input_embedded = torch.cat((temporal_input_embedded, spatial_input_embedded), dim=0)
+            # todo 重构过后的完整历史轨迹特征
+            # encoder_var = self.temporal_encoder_2(temporal_input_embedded)
+            # temporal_input_embedded = encoder_var[-1]
+            temporal_input_embedded = self.temporal_encoder_2(temporal_input_embedded)[-1]
+            # noise_to_cat = noise.repeat(temporal_input_embedded.shape[0], 1)
+            # temporal_input_embedded_wnoise = torch.cat((temporal_input_embedded, noise_to_cat), dim=1)
+            # outputs_current = self.output_layer(temporal_input_embedded_wnoise)
+            # todo 回传 outputs：相应的将预测结果传回(只在obs之后开始回传)，在预测新的一帧时运用，GM则回传中间特征层的数据，每次都只回传最新帧
+            # outputs[framenum, node_index] = outputs_current
+            # todo是否是因为此处还未backwardtemporal_input_embedded，而GM的值就已经改变，而使得对应的值也被变了
+            GM[framenum, node_index] = temporal_input_embedded
+        # Reshape input to (8, batch——size，hidden_dim) 转变为(batch——size，hidden_dim,8)（batch——size*hidden——dim，8）
+        encoder_past = GM[:self.args.obs_length-1,:,:].permute(1,2,0)
+        encoder_furture = GM[self.args.obs_length:,:,:].permute(1,2,0)
+        encoder_past = encoder_past.view(-1,encoder_past.size(-1))
+        encoder_furture = encoder_furture.view(-1, encoder_furture.size(-1))
+        # Pass through the fully connected layer Reshape back to ( batch_size, hidden_dim)
+        encoder_past = self.encoder_past_layer(encoder_past).view(-1,self.embedding_size)
+        encoder_furture = self.encoder_furture_layer(encoder_furture).view(-1,self.embedding_size)
+
+        # ---------------------CVAE-------------------------------
+        ### q dist ###
+        """
+        根据超参数self.args.ztype的设置，选择创建哪种分布类型的后验分布q(z|x,y)。如果ztype为'gaussian'，
+        则使用Normal（高斯分布）类创建一个正态分布，并以qz_param作为分布的参数;
+        从后验分布q(z | x,y)中抽样得到qz_sampled，将其用于计算KL散度（KL divergence）损失项。
+        """
+        # (batch_size,hidden_dim*2) 64
+        h = torch.cat((encoder_past,encoder_furture),dim=-1)
+        # (batch_size,16) 64->16
+        h = self.out_mlp(h)
+        # 在变分自编码器中，潜变量 z 的均值和方差是通过编码器网络输出的，并且需要满足一定的分布假设，例如高斯分布。
+        # 因此，该线性层的作用是将 MLP 的输出映射到满足分布假设的潜变量均值和方差，从而使得潜变量 z 可以被正确地解码和重构。
+        qz_param = self.qz_layer(h)
+        if self.args.ztype == 'gaussian':
+            qz_distribution = Normal(params=qz_param)
+        else:
+            ValueError('Unknown hidden distribution!')
+        qz_sampled = qz_distribution.rsample()
+        ### p dist ###
+        """
+        根据超参数self.args.learn_prior的设置，选择创建哪种分布类型的先验分布p(z)。如果learn_prior为True，
+        则使用线性层对象self.pz_layer生成一个包含均值和标准差参数的向量pz_param，并以此创建一个Normal分布pz_distribution。
+        如果learn_prior为False，则以0为均值、方差为1的标准正态分布作为先验分布p(z)
+        """
+        if self.args.learn_prior:
+            pz_param = self.pz_layer(encoder_past)
+            if self.args.ztype == 'gaussian':
+                pz_distribution = Normal(params=pz_param)
+            else:
+                ValueError('Unknown hidden distribution!')
+        else:
+            if self.args.ztype == 'gaussian':
+                pz_distribution = Normal(mu=torch.zeros(encoder_past.shape[0], self.args.zdim).to(encoder_past.device),
+                                         logvar=torch.zeros(encoder_past.shape[0], self.args.zdim).to(encoder_past.device))
+            else:
+                ValueError('Unknown hidden distribution!')
+        ### use q ###
+        # z = qz_sampled
+        # 基于解码器，输入过去轨迹past_traj和特征past_feature，采样的z，agent_num
+        pred_traj, recover_traj = self.decoder(encoder_past, qz_sampled, batch_size, num_Ped, past_traj, cur_location,
+                                               sample_num=1)
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 """
 舍弃无用参数赋值类

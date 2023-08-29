@@ -20,14 +20,14 @@ def get_parser():
     parser = argparse.ArgumentParser(
         description='STAR')
     # 后续可以改成SDD NBA
-    parser.add_argument('--dataset', default='eth5')
+    parser.add_argument('--dataset', default='eth5',type = str,help='set this value to [eth5,SDD,NFL,NBA]')
     # 需要添加新的名字，使得meta与原始的有所区别
     parser.add_argument('--save_dir',help='?')
     parser.add_argument('--model_dir')
     parser.add_argument('--config')
     parser.add_argument('--using_cuda', default=True, type=ast.literal_eval)
     parser.add_argument('--test_set', default='eth', type=str,
-                        help='Set this value to [eth, hotel, zara1, zara2, univ] for ETH-univ, ETH-hotel, UCY-zara01, UCY-zara02, UCY-univ')
+                        help='Set this value to [eth, hotel, zara1, zara2, univ,SDD] for ETH-univ, ETH-hotel, UCY-zara01, UCY-zara02, UCY-univ,SDD')
     parser.add_argument('--base_dir', default='.', help='Base directory including these scripts.')
     parser.add_argument('--save_base_dir', default='./output/', help='Directory for saving caches and models.')
     parser.add_argument('--phase', default='train', help='Set this value to \'train\' or \'test\'')
@@ -51,6 +51,8 @@ def get_parser():
                         help="=True:random rotation of each trajectory fragment")
     parser.add_argument('--neighbor_thred', default=10, type=int)
     parser.add_argument('--learning_rate', default=0.0015, type=float)
+    parser.add_argument('--inner_learning_rate',default=0.0015,type=float,help='需要考虑设置为多少，先设置和star默认的一样')
+    parser.add_argument('--outer_learning_rate',default=0.0015,type=float,help='内外循环不同的学习率，需要考虑是全程一致，还是要有减少')
     parser.add_argument('--clip', default=1, type=int)
     parser.add_argument('--second_order', type=str, default="False", help='Dropout_rate_value')
     parser.add_argument('--first_order_to_second_order_epoch', type=int, default=-1, help='maml改进')
@@ -58,6 +60,13 @@ def get_parser():
     parser.add_argument('--device', type=int, default=3, help='GPU选择')
     parser.add_argument('--batch_around_ped_meta', default=256, type=int, help='meta一个batch所应该包含的行人数，可以调节一下分析')
     parser.add_argument('--query_sample_num', default=4, type=int,help='每个数据集中的support采集对应几个query')
+    parser.add_argument('--fine_tuning',default="False",type = str,help='决定是否要进行测试时的微调 可选Fasle True')
+    parser.add_argument('--fine_tuning_nums_epoch', default=100, type=int, help='决定是否要进行测试时的微调')
+    parser.add_argument('--stage', default='origin', type=str, help='决定是否进行meta训练 可选origin meta MVDG')
+    parser.add_argument('--optim_trajectory_num',default=3,type=int,help='优化轨迹数量')
+    parser.add_argument('--ztype',default='gaussian',type=str, help='选择创建哪种分布类型的后验分布q(z|x,y)')
+    parser.add_argument('--zdim',default=16,type=int,help='对应的z均值和方差的维度')
+
     return parser
 
 
@@ -105,9 +114,16 @@ if __name__ == '__main__':
     #torch.autograd.set_detect_anomaly(True)
     parser = get_parser()
     p = parser.parse_args()
-
+    # test-set 可以设置为SDDNBA,NFL等其他数据集
+    # 当去SDD时 相应的地址为。
+    # p.save_dir = ./output/SDD/     p.model_dir = ./output/SDD/star_origin/ 或者./output/SDD/star_meta/
     p.save_dir = p.save_base_dir + str(p.test_set) + '/'
-    p.model_dir = p.save_base_dir + str(p.test_set) + '/' + p.train_model + '/'
+    if p.stage == 'origin':
+        p.model_dir = p.save_base_dir + str(p.test_set) + '/' + p.train_model + '_origin' + '/'
+    elif p.stage == 'meta':
+        p.model_dir = p.save_base_dir + str(p.test_set) + '/' + p.train_model + '_meta' + '/'
+    elif p.stage == 'MVDG':
+        p.model_dir = p.save_base_dir + str(p.test_set) + '/' + p.train_model + '_MVDG' + '/'
     p.config = p.model_dir + '/config_' + p.phase + '.yaml'
 
     if not load_arg(p):
@@ -119,7 +135,9 @@ if __name__ == '__main__':
 
     trainer = processor(args)
 
-    if args.phase == 'test':
+    if args.phase == 'test' and args.fine_tuning == 'True':
+        trainer.test_meta()
+    elif args.phase == 'test' and args.fine_tuning == 'False':
         trainer.test()
     else:
         trainer.train()
