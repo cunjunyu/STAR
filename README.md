@@ -56,3 +56,32 @@ If you find this repo useful, please consider citing our paper
 ### Reference
 
 The code base heavily borrows from [SR-LSTM](https://github.com/zhangpur/SR-LSTM)
+
+### New way to use eth,ucy数据集 
+```angular2html
+--dataset        普通单独数据集实验eth5 SDD 数据集迁移实验 eth5-SDD SDD-eth5
+--test_set       sdd hotel eth univ zara1 zara2   //选取作为测试集的场景
+--start-test     5    //何时开始在训练中运用测试数据进行测试
+--phase          train test     // 阶段
+--stage          origin  meta  MVDG   //origin表示最初模型，meta表示添加MLDG，
+--meta_way       sequential1  parallel2   //两种MLDG的写法
+--train_model    star  new_star      //  star 原始模型 new_star 加上CVAE并重构star
+--SDD_if_filter  True  False   //True：过滤非行人数据 
+--batch_around_ped   512        // 每批次包含行人的数目 主要为测试数据使用，或指标origin阶段
+--batch_around_ped_meta 512     // 每批次包含行人的数目 meta写法中的task所包含的，
+
+```
+train-origin eth-ucy数据集 测试场景为hotel，训练阶段，新模型，训练范式原始，batch512
+```
+python trainval.py --dataset eth5 --test_set hotel --start_test 5 --device 1  --phase train --stage origin --train_model new_star --batch_around_ped 512 
+```
+train-meta eth-ucy数据集 测试场景为hotel，训练阶段，新模型，训练范式MLDG，batch512,batchmeta512,mldg版本串行版 [效果最好版]
+```
+python trainval.py --dataset eth5 --test_set hotel --start_test 5 --device 1  --phase train --stage meta --meta_way sequential1 --train_model new_star --batch_around_ped 512 --batch_around_ped_meta 512
+```
+train-meta SDD数据集 测试场景为sdd，训练阶段，新模型，训练范式MLDG，batch512,batchmeta512,mldg版本串行版,过滤行人
+```angular2html
+
+--dataset SDD --test_set sdd --start_test 0 --device 2 --meta_way sequential1 --SDD_if_filter True --phase train --stage meta --train_model new_star --batch_around_ped 512 --batch_around_ped_meta 512
+```
+

@@ -112,10 +112,10 @@ class STEncoder_HIN(nn.Module):
         self.dropout_in_1 = nn.Dropout(self.dropout_prob)
         self.dropout_in_2 = nn.Dropout(self.dropout_prob)
         # 注意相对应的ST-HIN采用的是双路的结构 并且用的都是经过transformer后的最后一步的值 故而此处用不到full-layer 需要注释掉 以防其在MLDG的过程中发生错误
-        #if stage == 'past':
-        #    self.encoder_full_layer = nn.Linear(self.args.obs_length, 1)
-        #elif stage == 'future':
-        #    self.encoder_full_layer = nn.Linear(self.args.pred_length, 1)
+        if stage == 'past':
+            self.encoder_full_layer = nn.Linear(self.args.obs_length, 1)
+        elif stage == 'future':
+            self.encoder_full_layer = nn.Linear(self.args.pred_length, 1)
 
     def forward(self, inputs):
         # nodes_current/abs (8,num_ped,2),nei_list(relation_num, 8, num_ped, num_ped)
@@ -386,3 +386,53 @@ class STAR_CVAE_HIN(STAR_CVAE):
         #  (agent_num, sample_num, self.past_length, 2) -> (sample_num,agent_num,  self.past_length, 2)
         diverse_pred_traj = diverse_pred_traj.permute(1, 0, 2, 3)
         return diverse_pred_traj, target_pred_traj
+
+    def inference_visual(self, inputs,scene_frame):
+        # scene_frame 包含对应的scene和frame数据
+        # 这是一个模型推理方法的实现。该方法接收包含过去轨迹的数据，并根据学习到的先验和给定的过去轨迹输出多样化的预测轨迹。
+        # 该方法使用过去编码器计算过去特征，使用pz_layer从先验分布中采样，并使用解码器生成多样化的预测轨迹。最终输出的结果是多样性预测轨迹。
+        # 注意此处inputs前期输入的是19s，此处更改为正确的20s，因为方法不一样了
+        # nodes_abs 为原始的轨迹 后续也用这个 seq
+        obs_length = self.args.obs_length
+        pred_length = self.args.pred_length
+        # nodes_abs未归一化 /nodes_norm(归一化后)(19,259,2)  shift_value(19 259 2) seq_list (19,259) nei_lists(19 259 259) nei_num(19,259) batch_pednum(50)
+        nodes_abs, nodes_norm, shift_value, seq_list, nei_lists, nei_num, batch_pednum = inputs
+        # 注意 此处针对的是不同帧下行人数量不一的问题，传统的解决思路是直接提取从头到尾到存在的行人，而star方法则是逐帧中提取从头到尾到存在的行人，
+        # 最后的loss计算时也是只考虑从头到尾的行人，这个只是相当于利用了更多行人的信息；但在此处，我们采用传统思路预处理，因为我们是针对完全形态分析
+        # node-idx筛选出从起始到当前帧都存在的ped
+        node_index = self.get_node_index(seq_list)
+        new_scene_frame = scene_frame.loc[node_index.cpu().numpy(),:]
+        # 基于node——index取出数据获得新的scene-frame以及新的inputs 从而确保过去的轨迹正确对应
+        # nei_list = nei_lists[:, node_index, :]
+        # nei_list = nei_list[:, :, node_index]
+        # todo 基于相应的不同的 nei-list进行设计的
+        nei_list = nei_lists[:, :, node_index, :]
+        nei_list = nei_list[:, :, :, node_index]
+        # 更新batch-pednum：去除消失的行人后batch中每个windows下的新的人数；
+        updated_batch_pednum = self.update_batch_pednum(batch_pednum, node_index)
+        # 依据updated-batch-pednum得出相应的每个windows中开始和结束的行人序列号，便于分开处理
+        st_ed = self.get_st_ed(updated_batch_pednum)
+        nodes_current = nodes_abs[:, node_index, :]
+        nodes_abs_position = self.mean_normalize_abs_input(nodes_abs[:, node_index], st_ed)
+        past_traj = nodes_current[:obs_length], nodes_abs_position[:obs_length], nei_list[:, :obs_length]
+        past_feature = self.past_encoder(past_traj)
+        target_pred_traj = nodes_current[obs_length:] # 基于非归一化的轨迹
+        # 上述代码计算潜在空间中的特征向量past_feature，相同于forward，只是在测试推理过程中不需要未来数据
+        sample_num = 20
+        # todo pz-layer
+        past_feature_repeat = past_feature.repeat_interleave(sample_num, dim=0)
+        if self.args.ztype == 'gaussian':
+            pz_distribution = Normal(
+                mu=torch.zeros(past_feature_repeat.shape[0], self.args.zdim).to(past_feature.device),
+                logvar=torch.zeros(past_feature_repeat.shape[0], self.args.zdim).to(past_feature.device))
+        else:
+            ValueError('Unknown hidden distribution!')
+        pz_sampled = pz_distribution.rsample()
+        z = pz_sampled
+        node_past = nodes_current[:obs_length].transpose(0, 1)
+        diverse_pred_traj, _ = self.decoder(past_feature_repeat, z, node_past, sample_num=self.args.sample_num,
+                                            mode='inference')
+        #  (agent_num, sample_num, self.past_length, 2) -> (sample_num,agent_num,  self.past_length, 2)
+        diverse_pred_traj = diverse_pred_traj.permute(1, 0, 2, 3)
+        # 返回完整的轨迹样式，因为SDD中进行了数据删除 不在对应了
+        return diverse_pred_traj, nodes_current,new_scene_frame

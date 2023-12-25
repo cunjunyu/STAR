@@ -188,6 +188,9 @@ class NBA_Dataloader():
             f = open(cachefile, 'rb')
             raw_data = pickle.load(f)
             f.close()
+            # 相应的两种nums的利用途径 此处的raw-data包含了相应的nums
+            # trainbatch_nums = len(raw_data)
+            # return raw_data,trainbatch_nums
             return raw_data
         elif os.path.exists(cachefile_split):
             # 第二步 统计每个目录下有多少个分开的文件夹
@@ -431,11 +434,10 @@ class NBA_Dataloader():
         # 此处的batch-task-num  ->  需要调节
         if batch_task_num < 50:
             f = open(cachefile, "wb")
-            pickle.dump(batch_task, f, protocol=2)
+            pickle.dump((batch_task,batch_task_num), f, protocol=2)
             f.close()
         else:
             self.pick_split_data(batch_task, cachefile, batch_size=50)
-
 
     def MVDG_TASK(self,setname):
         # 还未验证 需要后续分析
@@ -506,7 +508,7 @@ class NBA_Dataloader():
         print('mvdg task number : ' + str(new_batch_task_list_num))
         if new_batch_task_list_num < 50 :
             f = open(cachefile, "wb")
-            pickle.dump(new_batch_task_list, f, protocol=2)
+            pickle.dump((new_batch_task_list,new_batch_task_list_num), f, protocol=2)
             f.close()
         else:
             self.pick_split_data(new_batch_task_list,cachefile,batch_size= 50)
@@ -522,6 +524,7 @@ class NBA_Dataloader():
         Batch_id = []
         # todo 每段视频下是固定的行人数目 故而整体会简单许多
         present_pedi = 11
+        #完整的15帧数据以及处理好的 故而后续不在需要进行降采样
         if setname == 'train':
             skip = self.trainskip
         else:
@@ -578,7 +581,7 @@ class NBA_Dataloader():
         '''
         if self.args.dataset == "eth5":
             relation_num = 1
-        elif self.args.dataset == "SDD" or self.args.dataset == "NBA" or self.args.dataset == "NFL":
+        elif self.args.dataset == "SDD" or self.args.dataset == "NBA" or self.args.dataset == "soccer":
             relation_num = 3
         num_Peds = 0
         for batch in batch_data:

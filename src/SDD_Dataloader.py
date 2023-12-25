@@ -678,7 +678,7 @@ class SDD_Dataloader():
         self.testbatch, self.testbatchnums = self.load_split_data(self.test_batch_cache)
         print('Total number of test batches:', self.testbatchnums)
 
-        if self.args.stage == 'origin':
+        if self.args.stage == 'origin' and self.args.phase == 'train':
             print("Preparing origin data batches.")
             if not (os.path.exists(self.train_batch_cache) or os.path.exists(self.train_batch_cache_split)):
                 self.train_frameped_dict, self.train_pedtraject_dict,self.train_scene_list,self.train_pedlabel_dict = self.load_dict(self.train_data_file)
@@ -687,7 +687,7 @@ class SDD_Dataloader():
             self.trainbatch, self.trainbatchnums= self.load_split_data(self.train_batch_cache)
             print('Total number of training origin batches:', self.trainbatchnums)
 
-        elif self.args.stage == 'meta':
+        elif self.args.stage == 'meta'and self.args.phase == 'train':
             if not (os.path.exists(self.train_MLDG_batch_cache) or os.path.exists(self.train_MLDG_batch_cache_split)):
                 print("process train meta cpkl")
                 self.train_frameped_dict, self.train_pedtraject_dict, self.train_scene_list, self.train_pedlabel_dict = self.load_dict(self.train_data_file)
@@ -695,7 +695,7 @@ class SDD_Dataloader():
             self.train_batch_task,self.train_batch_tasknums = self.load_split_data(self.train_MLDG_batch_cache)
             print('Total number of training MLDG task batches :', len(self.train_batch_task))
 
-        elif self.args.stage == 'MVDG' or self.args.stage =='MVDGMLDG':
+        elif ( self.args.stage == 'MVDG' or self.args.stage =='MVDGMLDG' ) and self.args.phase == 'train':
             if not (os.path.exists(self.train_MVDG_batch_cache) or os.path.exists(self.train_MVDG_batch_cache_split)):
                 self.train_frameped_dict, self.train_pedtraject_dict, self.train_scene_list, self.train_pedlabel_dict = self.load_dict(self.train_data_file)
                 self.MVDG_TASK(setname='train')
@@ -724,10 +724,10 @@ class SDD_Dataloader():
         # 第二步 按场景分解获取对应batch数据
         for seti, seti_frameped_dict in enumerate(frameped_dict):
             trainbatch_meta.append({})
-            # 只需要在此处将data-index按相应的场景分开即可
+            # 只需要在此处将data-index按相应的场景分开即可 此处data-index传入了对应的seti 故而出来的data-index会与结果有较好的对应
             data_index = self.get_data_index_meta(seti, seti_frameped_dict, setname, ifshuffle=shuffle)
             train_index = data_index
-            train_batch = self.get_seq_from_index_balance_HIN(frameped_dict, pedtraject_dict,pedlabel_dict, train_index, setname)
+            train_batch = self.get_seq_from_index_balance_HIN(frameped_dict, pedtraject_dict,pedlabel_dict, train_index, setname,scene_list)
             trainbatchnums = len(train_batch)
             # list（场景号） - list（windows号） -tuple （）
             trainbatch_meta[seti] = train_batch
@@ -792,7 +792,7 @@ class SDD_Dataloader():
             # 只需要在此处将data-index按相应的场景分开即可
             data_index = self.get_data_index_meta(seti, seti_frameped_dict, setname, ifshuffle=shuffle)
             train_index = data_index
-            train_batch = self.get_seq_from_index_balance_HIN(frameped_dict, pedtraject_dict,pedlabel_dict, train_index, setname)
+            train_batch = self.get_seq_from_index_balance_HIN(frameped_dict, pedtraject_dict,pedlabel_dict, train_index, setname,scene_list)
             trainbatchnums = len(train_batch)
             # list（场景号） - list（windows号） -tuple （）
             trainbatch_meta[seti] = train_batch
@@ -858,17 +858,20 @@ class SDD_Dataloader():
     def dataPreprocess_HIN(self,setname):
         """
         Function to load the process data into the Dataloader object
+        # 需要为每个行人添加对应的scene-id -- pedtraject-dict内部包含相应的seti，相应的取出该值即可
         """
         if setname == 'train':
             frameped_dict = self.train_frameped_dict
             pedtraject_dict = self.train_pedtraject_dict
             pedlabel_dict = self.train_pedlabel_dict
             cachefile = self.train_batch_cache
+            scene_list = self.train_scene_list
         else:
             frameped_dict = self.test_frameped_dict
             pedtraject_dict = self.test_pedtraject_dict
             pedlabel_dict = self.test_pedlabel_dict
             cachefile = self.test_batch_cache
+            scene_list = self.test_scene_list
         if setname != 'train':
             shuffle = False
         else:
@@ -877,9 +880,9 @@ class SDD_Dataloader():
         print(setname)
         data_index = self.get_data_index(frameped_dict, setname, ifshuffle=shuffle)
         # data-index:各自数据集中所有帧 ID 和它们所属的数据集 ID、数字化后（打乱的）的帧 ID 存储在一个 3 x N 的 NumPy 数组
-        trainbatch = self.get_seq_from_index_balance_HIN(frameped_dict, pedtraject_dict, pedlabel_dict, data_index, setname)
+        trainbatch = self.get_seq_from_index_balance_HIN(frameped_dict, pedtraject_dict, pedlabel_dict, data_index, setname,scene_list)
         trainbatchnums = len(trainbatch)
-        print('train_batch_num:'+str(trainbatchnums))
+        print(str(setname)+'batch_num:'+str(trainbatchnums))
         # todo ! 改用更节省时间的序列化 train 19772 test 10112
         #  尝试将原始数据进行分批次序列化  以及在加载的时候进行反序列化
         if trainbatchnums < 40:
@@ -895,7 +898,7 @@ class SDD_Dataloader():
         """
 
 
-    def get_seq_from_index_balance_HIN(self, frameped_dict, pedtraject_dict, pedlabel_dict,data_index, setname):
+    def get_seq_from_index_balance_HIN(self, frameped_dict, pedtraject_dict, pedlabel_dict,data_index, setname,scene_list):
         '''
         Query the trajectories fragments from data sampling index.
         Notes: Divide the scene if there are too many people; accumulate the scene if there are few people.
@@ -911,6 +914,7 @@ class SDD_Dataloader():
             if i % 100 == 0:
                 print(i, '/', data_index.shape[1])
             cur_frame, cur_set, _ = data_index[:, i]
+            cur_scene = scene_list[cur_set]
             framestart_pedi = set(frameped_dict[cur_set][cur_frame])
             # 计算并获取对应起始帧（子轨迹）的结束帧，由于当前的子轨迹的结束帧可能会超过数据集的范围，因此使用try-expect语句块处理这种情况
             try:
@@ -924,7 +928,9 @@ class SDD_Dataloader():
                 continue
             traject = ()
             IFfull = []
-            one_type = []
+            one_type = []  # 将行人或车辆的标记转为对应的整数
+            scene_type = []  # 记录每个行人的scene-id，以及对应的起始帧
+            frame_begin = [] # 记录每个行人的起始帧
             for ped in present_pedi:
                 # cur-trajec：该行人对应的子轨迹数据（可能是完整的20，也可能小于20） iffull指示其是否满，ifexistobs指示其是否存在我们要求的观测帧
                 cur_trajec, iffull, ifexistobs = self.find_trajectory_fragment(pedtraject_dict[cur_set][ped],
@@ -943,6 +949,8 @@ class SDD_Dataloader():
                 cur_trajec = (cur_trajec[:, 1:].reshape(-1, 1, 2),)
                 traject = traject.__add__(cur_trajec)
                 one_type.append(cur_type)
+                scene_type.append(cur_scene)
+                frame_begin.append(cur_frame)
                 IFfull.append(iffull)
             if traject.__len__() < 1:
                 continue
@@ -955,7 +963,8 @@ class SDD_Dataloader():
             ped_cnt += cur_pednum
             # 组合label与相应的traject
             # traject_batch_label = (traject_label,traject_batch)
-            batch_id = (cur_set, cur_frame,)
+            # batch_id = (cur_set, cur_frame,)
+            batch_id = (cur_scene, cur_frame,cur_pednum) # 最小单位的一个batch下的数据所处的场景和id都是相同的
             # enough people in the scene
             # batch_data.append(traject_batch_label)
             if cur_pednum >= self.args.batch_around_ped * 2:

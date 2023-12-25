@@ -20,35 +20,35 @@ def get_parser():
     parser = argparse.ArgumentParser(
         description='STAR')
     # 后续可以改成SDD NBA
-    parser.add_argument('--dataset', default='eth5',type = str,help='set this value to [eth5,SDD,NFL,NBA]')
+    parser.add_argument('--dataset', default='eth5',type = str,help='set this value to [eth5,SDD,NFL,NBA,soccer,eth5-SDD,SDD-eth5]')
     # 需要添加新的名字，使得meta与原始的有所区别
     parser.add_argument('--save_dir',help='?')
     parser.add_argument('--model_dir')
     parser.add_argument('--config')
     parser.add_argument('--using_cuda', default=True, type=ast.literal_eval)
     parser.add_argument('--test_set', default='eth', type=str,
-                        help='Set this value to [eth, hotel, zara1, zara2, univ,SDD] for ETH-univ, ETH-hotel, UCY-zara01, UCY-zara02, UCY-univ,SDD')
+                        help='Set this value to [eth, hotel, zara1, zara2, univ,SDD,soccer] for ETH-univ, ETH-hotel, UCY-zara01, UCY-zara02, UCY-univ,SDD')
     parser.add_argument('--base_dir', default='.', help='Base directory including these scripts.')
     parser.add_argument('--save_base_dir', default='./output/', help='Directory for saving caches and models.')
     parser.add_argument('--phase', default='train', help='Set this value to \'train\' or \'test\'')
-    parser.add_argument('--train_model', default='star', help='Your model name')
+    parser.add_argument('--train_model', default='star', type=str, help='Your model name star/new_star/new_star_hin')
     parser.add_argument('--load_model', default=None, type=str, help="load pretrained model for test or training, 需要的时候相应传入str，会组成model_str进行后续计算")
     parser.add_argument('--model', default='star.STAR')
     parser.add_argument('--seq_length', default=20, type=int)
     parser.add_argument('--obs_length', default=8, type=int,help='注意test时，是否可以变换，以及不同的数据集也会改')
     parser.add_argument('--pred_length', default=12, type=int)
-    parser.add_argument('--batch_around_ped', default=256, type=int,help='一个batch所应该包含的行人数，可以调节一下分析')
     parser.add_argument('--batch_size', default=8, type=int)
     # 似乎没什么用？batch-size；其有batch-around-ped决定了
     parser.add_argument('--test_batch_size', default=4, type=int)
     parser.add_argument('--show_step', default=100, type=int)
     parser.add_argument('--start_test', default=10, type=int)
     parser.add_argument('--sample_num', default=20, type=int)
-    parser.add_argument('--num_epochs', default=300, type=int)
+    parser.add_argument('--num_epochs', default=1000, type=int)
     parser.add_argument('--ifshow_detail', default=True, type=ast.literal_eval)
     parser.add_argument('--ifsave_results', default=False, type=ast.literal_eval)
     parser.add_argument('--randomRotate', default=True, type=ast.literal_eval,
                         help="=True:random rotation of each trajectory fragment")
+    # todo 此处不同的数据集 这个是否需要进行调整 eth-ucy用的是m sdd用的是pixel!!! 需要呀！ 你之前发现了咋不去调节 无语！
     parser.add_argument('--neighbor_thred', default=10, type=int)
     parser.add_argument('--learning_rate', default=0.0015, type=float)
     parser.add_argument('--inner_learning_rate',default=0.0015,type=float,help='需要考虑设置为多少，先设置和star默认的一样')
@@ -58,15 +58,28 @@ def get_parser():
     parser.add_argument('--first_order_to_second_order_epoch', type=int, default=-1, help='maml改进')
     parser.add_argument('--task_learning_rate', default=0.0015, type=float, help='内循环学习率')
     parser.add_argument('--device', type=int, default=3, help='GPU选择')
+    parser.add_argument('--batch_around_ped', default=256, type=int, help='一个batch所应该包含的行人数，可以调节一下分析')
     parser.add_argument('--batch_around_ped_meta', default=256, type=int, help='meta一个batch所应该包含的行人数，可以调节一下分析')
     parser.add_argument('--query_sample_num', default=4, type=int,help='每个数据集中的support采集对应几个query')
-    parser.add_argument('--fine_tuning',default="False",type = str,help='决定是否要进行测试时的微调 可选Fasle True')
-    parser.add_argument('--fine_tuning_nums_epoch', default=100, type=int, help='决定是否要进行测试时的微调')
-    parser.add_argument('--stage', default='origin', type=str, help='决定是否进行meta训练 可选origin meta MVDG')
+    parser.add_argument('--stage', default='origin', type=str, help='决定是否进行meta训练 可选origin meta MVDG MVDGMLDG')
     parser.add_argument('--optim_trajectory_num',default=3,type=int,help='优化轨迹数量')
     parser.add_argument('--ztype',default='gaussian',type=str, help='选择创建哪种分布类型的后验分布q(z|x,y)')
     parser.add_argument('--zdim',default=16,type=int,help='对应的z均值和方差的维度')
-
+    # KL散度设置
+    parser.add_argument('--min_clip', type=float, default=2.0)
+    # 学习先验分布
+    parser.add_argument('--learn_prior', action='store_true', default=False)
+    parser.add_argument('--SDD_if_filter',type=str,default='False',help='是否只需要行人数据集')
+    parser.add_argument('--meta_way',type=str,default='sequential1',help='可以用两种选项，即parallel2并行和sequential1串行')
+    parser.add_argument('--lam',type=float,default=0.05,help='在元测试时注入特征')
+    parser.add_argument('--ifmixup',default=False, type=ast.literal_eval,help='确定是否运用混合特征注入')
+    parser.add_argument('--SDD_from',default='sdd_origin',type=str,help='确定SDD的数据来源，sdd_origin 最原始的 sdd_exist PECNet数据')
+    parser.add_argument('--relation_num',default=3,type = int,help='确定相应的不同数据集内agent类型的数量 ')
+    parser.add_argument('--HIN',default='False',type=str,help='确定是否需要运用HIN结构，以及相应的数据处理')
+    # 可视化分析
+    parser.add_argument('--vis', type = str,default='None',help='分析是否需要以及何种可视化None：无，sne，traj, traj_comparison')
+    parser.add_argument('--k_best',type=int,default=1,help='分析SDD可视化中需要的误差数量')
+    # parser.add_argument('--time_embedding',default=True,type=ast.literal_eval,help='确定如何从多个维度转变为一个')
     return parser
 
 
@@ -117,14 +130,9 @@ if __name__ == '__main__':
     # test-set 可以设置为SDDNBA,NFL等其他数据集
     # 当去SDD时 相应的地址为。
     # p.save_dir = ./output/SDD/     p.model_dir = ./output/SDD/star_origin/ 或者./output/SDD/star_meta/
-    p.save_dir = p.save_base_dir + str(p.test_set) + '/'
-    if p.stage == 'origin':
-        p.model_dir = p.save_base_dir + str(p.test_set) + '/' + p.train_model + '_origin' + '/'
-    elif p.stage == 'meta':
-        p.model_dir = p.save_base_dir + str(p.test_set) + '/' + p.train_model + '_meta' + '/'
-    elif p.stage == 'MVDG':
-        p.model_dir = p.save_base_dir + str(p.test_set) + '/' + p.train_model + '_MVDG' + '/'
-    p.config = p.model_dir + '/config_' + p.phase + '.yaml'
+    p.save_dir = p.save_base_dir + str(p.dataset)+'/' + str(p.test_set) + '/'
+    p.model_dir = p.save_base_dir +  str(p.dataset)+'/' + str(p.test_set) + '/' + str(p.train_model) +'_' + str(p.stage) + '/'
+    p.config = p.model_dir + 'config_' + p.phase + '.yaml'
 
     if not load_arg(p):
         save_arg(p)
@@ -135,12 +143,14 @@ if __name__ == '__main__':
 
     trainer = processor(args)
 
-    if args.phase == 'test' and args.fine_tuning == 'True':
-        trainer.test_meta()
-    elif args.phase == 'test' and args.fine_tuning == 'False':
+    if args.phase == 'test' and args.vis !='None' :
+        trainer.test_vis()
+    elif args.phase == 'test' and args.vis == 'None':
         trainer.test()
-    else:
+    elif args.phase == 'train':
         trainer.train()
+    else:
+        raise NotImplementedError
 
     # 关闭异常检测 找到错误后进行关闭
     # torch.autograd.set_detect_anomaly(False)
