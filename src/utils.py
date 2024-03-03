@@ -1,15 +1,10 @@
-import os
 import pickle
 import random
-import time
 import numpy as np
 import torch
-import pandas as pd
 import os
-import cv2
-from copy import deepcopy
-from torch import nn
-from src.SDD_Dataloader import load_SDD,downsample_all_frame,split_fragmented,traject_preprocess_SDD,SDD_Dataloader
+from DataProcessor.SDD_Dataloader import traject_preprocess_SDD
+
 torch.manual_seed(0)
 # todo 测试只给了5个，总的数据集有8个，有部分只用作训练？ 命名和实际部分不太符合
 DATASET_NAME_TO_NUM = {
@@ -38,9 +33,9 @@ class Trajectory_Dataloader():
         # -----MVDG-------------
         self.train_MVDG_batch_cache = os.path.join(self.args.model_dir, "train_MVDG_batch_cache.cpkl")
         # todo 数据处理 并不需要每次都从头开始处理 ！
-        if self.args.dataset == 'eth5':
-            self.train_dataset = 'eth5'
-            self.test_dataset = 'eth5'
+        if self.args.dataset == 'ETH_UCY':
+            self.train_dataset = 'ETH_UCY'
+            self.test_dataset = 'ETH_UCY'
 
             self.data_dirs = ['./data/eth/univ', './data/eth/hotel',
                               './data/ucy/zara/zara01', './data/ucy/zara/zara02',
@@ -87,8 +82,8 @@ class Trajectory_Dataloader():
                 # self.traject_preprocess_SDD('train') # self.traject_preprocess_SDD('test')
             print("Done.")
         # todo 此处后续的数据集数据迁移实验  单独在进行分析
-        elif self.args.dataset == 'eth5-SDD':
-            self.train_dataset = 'eth5'
+        elif self.args.dataset == 'ETH_UCY-SDD':
+            self.train_dataset = 'ETH_UCY'
             self.test_dataset = 'SDD'
             self.data_dirs = ['./data/eth/univ', './data/eth/hotel',
                               './data/ucy/zara/zara01', './data/ucy/zara/zara02',
@@ -112,9 +107,9 @@ class Trajectory_Dataloader():
                 print('将SDD的部分数据作为测试集')
                 self.traject_preprocess_SDD('test')
             print('Done')
-        elif self.args.dataset == 'SDD-eth5':
+        elif self.args.dataset == 'SDD-ETH_UCY':
             self.train_dataset = 'SDD'
-            self.test_dataset = 'eth5'
+            self.test_dataset = 'ETH_UCY'
             self.data_dirs = ['./data/eth/univ', './data/eth/hotel',
                               './data/ucy/zara/zara01', './data/ucy/zara/zara02',
                               './data/ucy/univ/students001', './data/ucy/univ/students003',
@@ -152,9 +147,9 @@ class Trajectory_Dataloader():
         if not (os.path.exists(self.test_batch_cache)):
             self.test_frameped_dict, self.test_pedtraject_dict,self.test_scene_list = self.load_dict(self.test_data_file)
             self.dataPreprocess('test',dataset=self.test_dataset)
-        self.testbatch, self.testbatchnums, _, _ = self.load_cache(self.test_batch_cache)
+        self.testbatch, self.test_batchnums, _, _ = self.load_cache(self.test_batch_cache)
 
-        print('Total number of test batches:', self.testbatchnums)
+        print('Total number of test batches:', self.test_batchnums)
         # 依据条件处理训练集数据
         if self.args.stage == 'origin':
             # Load the processed origin data from the pickle file （原始非meta）
@@ -163,8 +158,8 @@ class Trajectory_Dataloader():
                 self.frameped_dict, self.pedtraject_dict,self.train_scene_list = self.load_dict(self.train_data_file)
                 self.dataPreprocess(setname ='train',dataset=self.train_dataset)
             # 为对比实验而准备 todo pickle data was truncated // run out of input
-            self.trainbatch, self.trainbatchnums, _, _ = self.load_cache(self.train_batch_cache)
-            print('Total number of training batches:', self.trainbatchnums)
+            self.trainbatch, self.train_batchnums, _, _ = self.load_cache(self.train_batch_cache)
+            print('Total number of training batches:', self.train_batchnums)
 
         elif self.args.stage == 'meta':
             # Load the meta-processed data from the pickle file
@@ -177,8 +172,8 @@ class Trajectory_Dataloader():
                 print("process train meta cpkl")
                 self.batchdata_meta, self.batchnums_meta,self.train_scene_list, _, _ = self.load_cache(self.train_seti_batch_cache)
                 self.meta_task(setname="train",dataset=self.train_dataset)
-            self.train_batch_task = self.load_cache(self.train_meta_batch_cache)
-            print('Total number of training meta task batches :', len(self.train_batch_task))
+            self.train_batch_MLDG_task = self.load_cache(self.train_meta_batch_cache)
+            print('Total number of training meta task batches :', len(self.train_batch_MLDG_task))
 
         elif self.args.stage == 'MVDG' or self.args.stage =='MVDGMLDG':
             print("Preparing seti data batches.")
@@ -217,8 +212,8 @@ class Trajectory_Dataloader():
         all_frame_data = []
         valid_frame_data = []
         numFrame_data = []
-
         Pedlist_data = []
+
         frameped_dict = []  # peds id contained in a certain frame
         pedtrajec_dict = []  # trajectories of a certain ped
         scene_list = []
@@ -387,7 +382,7 @@ class Trajectory_Dataloader():
         if not (os.path.exists(self.test_batch_cache)):
             self.test_frameped_dict, self.test_pedtraject_dict, self.test_scene_list = self.load_dict(self.test_data_file)
             self.dataPreprocess('test', dataset=self.test_dataset)
-        self.testbatch, self.testbatchnums, _, _ = self.load_cache(self.test_batch_cache)
+        self.test_batch, self.test_batchnums, _, _ = self.load_cache(self.test_batch_cache)
         # 获取train的数据
         if not (os.path.exists(self.train_seti_batch_cache)):
             self.frameped_dict, self.pedtraject_dict, self.train_scene_list = self.load_dict(self.train_data_file)
@@ -397,7 +392,7 @@ class Trajectory_Dataloader():
         # 合并test和train的数据
         data_dict = {'hotel':[],'zara01':[],'zara02':[],'univ':[],'eth':[]}
         # 对应关系 eth-univ，hotel，zara01，zara02，univ-[students001,students002]
-        data_dict[self.args.test_set].extend(self.testbatch)
+        data_dict[self.args.test_set].extend(self.test_batch)
         for id,scene in enumerate(self.train_scene_list):
             if scene in['hotel','zara01','zara02']:
                 data_dict[scene].extend(self.batchdata_meta[id])
@@ -428,7 +423,7 @@ class Trajectory_Dataloader():
                 if self.batchnums_meta[seti] == 0 or self.batchnums_meta[seti] ==[]:
                     continue
                 query_seti_id = list(range(len(self.batchnums_meta)))
-                if dataset == 'eth5':
+                if dataset == 'ETH_UCY':
                     query_seti_id.remove(seti)
                 elif dataset == 'SDD':
                     # 第一步依据seti以及对应的scene-list找出与set相同的场景，其他不同的加入到query——seti-id里
@@ -484,7 +479,7 @@ class Trajectory_Dataloader():
                 if self.batchnums_MVDG[seti] == 0 or self.batchnums_MVDG[seti] == []:
                     continue
                 query_seti_id = list(range(len(self.batchnums_MVDG)))
-                if dataset == 'eth5':
+                if dataset == 'ETH_UCY':
                     query_seti_id.remove(seti)
                 elif dataset == 'SDD':
                     # 第一步依据seti以及对应的scene-list找出与set相同的场景，其他不同的加入到query——seti-id里
@@ -633,7 +628,7 @@ class Trajectory_Dataloader():
         Batch_id = []
         temp = self.args.batch_around_ped_meta
 
-        if dataset == 'eth5':
+        if dataset == 'ETH_UCY':
             if setname == 'train':
                 skip = self.trainskip
             else:
@@ -652,7 +647,7 @@ class Trajectory_Dataloader():
             framestart_pedi = set(seti_frameped_dict[cur_frame])
             # 计算并获取对应起始帧（子轨迹）的结束帧，由于当前的子轨迹的结束帧可能会超过数据集的范围，因此使用try-expect语句块处理这种情况
             try:
-                if dataset == 'eth5':
+                if dataset == 'ETH_UCY':
                     frameend_pedi = set(seti_frameped_dict[cur_frame + (self.args.seq_length-1) * skip[cur_set]])
                 elif dataset == 'SDD':
                     frameend_pedi = set(seti_frameped_dict[cur_frame + (self.args.seq_length-1) * skip])
@@ -672,7 +667,7 @@ class Trajectory_Dataloader():
             """
             for ped in present_pedi:
                 # cur-trajec：该行人对应的子轨迹数据（可能是完整的20，也可能小于20） iffull指示其是否满，ifexistobs指示其是否存在我们要求的观测帧
-                if dataset == 'eth5':
+                if dataset == 'ETH_UCY':
                     cur_trajec, iffull, ifexistobs = self.find_trajectory_fragment(pedtraject_dict[cur_set][ped],
                                                                                    cur_frame,
                                                                                    self.args.seq_length, skip[cur_set])
@@ -818,7 +813,7 @@ class Trajectory_Dataloader():
         Batch_id = []
 
         temp = self.args.batch_around_ped
-        if dataset == 'eth5':
+        if dataset == 'ETH_UCY':
             if setname == 'train':
                 skip = self.trainskip
             else:
@@ -839,7 +834,7 @@ class Trajectory_Dataloader():
             framestart_pedi = set(frameped_dict[cur_set][cur_frame])
             # 计算并获取对应起始帧（子轨迹）的结束帧，由于当前的子轨迹的结束帧可能会超过数据集的范围，因此使用try-expect语句块处理这种情况
             try:
-                if dataset == 'eth5':
+                if dataset == 'ETH_UCY':
                     frameend_pedi = set(frameped_dict[cur_set][cur_frame + (self.args.seq_length-1) * skip[cur_set]])
                 elif dataset == 'SDD':
                     frameend_pedi = set(frameped_dict[cur_set][cur_frame + (self.args.seq_length-1) * skip])
@@ -859,7 +854,7 @@ class Trajectory_Dataloader():
             """
             for ped in present_pedi:
                 # cur-trajec：该行人对应的子轨迹数据（可能是完整的20，也可能小于20） iffull指示其是否满，ifexistobs指示其是否存在我们要求的观测帧
-                if dataset == 'eth5':
+                if dataset == 'ETH_UCY':
                     cur_trajec, iffull, ifexistobs = self.find_trajectory_fragment(pedtraject_dict[cur_set][ped],
                                                                                    cur_frame,
                                                                                    self.args.seq_length, skip[cur_set])
@@ -1135,13 +1130,13 @@ class Trajectory_Dataloader():
         return batch_data
 
     def get_train_batch(self, idx):
-        batch_data, batch_id = self.trainbatch[idx]
+        batch_data, batch_id = self.train_batch[idx]
         batch_data = self.rotate_shift_batch(batch_data, ifrotate=self.args.randomRotate)
 
         return batch_data, batch_id
 
     def get_test_batch(self, idx):
-        batch_data, batch_id = self.testbatch[idx]
+        batch_data, batch_id = self.test_batch[idx]
         batch_data = self.rotate_shift_batch(batch_data, ifrotate=False)
         return batch_data, batch_id
 

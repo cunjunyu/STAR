@@ -1,61 +1,65 @@
-import time
-
-import torch
-import torch.nn as nn
-from torch.autograd import Variable as V
-from .star import STAR
-from .star_cvae import STAR_CVAE
-from .star_cvae_hin import STAR_CVAE_HIN
-from .utils import *
-from .Loss import getLossMask,L2forTestS,L2forTest,timeit
-from .SDD_Dataloader import *
 import re
-from tqdm import tqdm
 import copy
-from torch.utils.tensorboard import SummaryWriter  # 导入
-from .NBA_Dataloader import NBA_Dataloader
-from .SDD_Dataloader import SDD_Dataloader
-from .Soccer_Dataloader import Soccer_Dataloader_NOHIN,Soccer_Dataloader_HIN
-from .Visual import draw_result_NBA,VISUAL_TSNE,draw_result_SDD,draw_result_SDD_comparison
+import logging
+from tqdm import tqdm
+from torch import nn
 
+from Model.star import STAR
+from Model.star_cvae import STAR_CVAE
+from Model.star_cvae_hin import STAR_CVAE_HIN
+from Model.DualTT import Dual_TT
 
+from src.Visual import draw_result_NBA,VISUAL_TSNE,draw_result_SDD,draw_result_SDD_comparison
+from src.visual_loss import draw_loss
+from src.utils import *
+from src.Loss import getLossMask,L2forTestS,L2forTest_RMSE_MAE,L2forTestS_NEWSTAR,L2forTest_RMSE_MAE_NEWSTAR
 
+from DataProcessor.SDD_Dataloader import *
+from DataProcessor.ETH_UCY_preprocess import DatasetProcessor_ETH_UCY
+from DataProcessor.SDD_preprocess import DatasetProcessor_SDD
+from DataProcessor.NBA_preprocess import DatasetProcessor_NBA
+from DataProcessor.Soccer_preprocess import DatasetProcessor_Soccer
+from DataProcessor.Ship_preprocess import DatasetProcessor_ship
+from DataProcessor.Ship_FVessel_preprocess import DatasetProcessor_ship_FVessel
 
 
 class processor(object):
     def __init__(self, args):
         self.args = args
-        self.device = args.device
-        # 加载数据与模型，设置优化率
-        if self.args.dataset == 'NBA' and self.args.train_model == 'new_star_hin':
-            self.dataloader = NBA_Dataloader(args)
-        elif self.args.dataset == 'SDD' and self.args.train_model == 'new_star_hin':
-            self.dataloader = SDD_Dataloader(args)
-        elif self.args.dataset == 'soccer' and self.args.train_model == 'new_star_hin':
-            self.dataloader = Soccer_Dataloader_HIN(args)
-        elif self.args.dataset == 'soccer' and self.args.train_model == 'star':
-            self.dataloader = Soccer_Dataloader_NOHIN(args)
-        elif self.args.dataset == 'eth5':
-            self.dataloader = Trajectory_Dataloader(args)
+        self.logger = self.set_logging(log_file=os.path.join(self.args.model_dir, 'recoder.log'))
+        # load data
+        if self.args.dataset == "ETH_UCY":
+            self.dataloader = DatasetProcessor_ETH_UCY(args)
+        elif self.args.dataset == "SDD":
+            self.dataloader = DatasetProcessor_SDD(args)
+        elif self.args.dataset == "NBA":
+            self.dataloader = DatasetProcessor_NBA(args)
+        elif self.args.dataset == "Soccer":
+            self.dataloader = DatasetProcessor_Soccer(args)
+        elif self.args.dataset == "Ship":
+            self.dataloader = DatasetProcessor_ship(args)
+        elif self.args.dataset == "Ship_FVessel":
+            self.dataloader = DatasetProcessor_ship_FVessel(args)
         else:
-            self.dataloader = Trajectory_Dataloader(args)
+            raise ValueError("Unknown dataset type")
 
-
-        # 设置两个不同的模型 模型结构一致 参数不一致 相应的net用于外循环 trajectory用作内循环 每次传递参数
+        # load model
         if self.args.train_model == 'star':
             self.net = STAR(args)
         elif self.args.train_model == 'new_star':
             self.net = STAR_CVAE(args)
         elif self.args.train_model == 'new_star_hin':
             self.net = STAR_CVAE_HIN(args)
+        elif self.args.train_model == 'Dual_TT':
+            self.net = Dual_TT(args)
         # todo 对于学习率优化方面 需要添加对应的内外循环各自的代码
+
         self.set_optimizer()
         self.task_learning_rate = self.args.task_learning_rate
-
-        if self.args.using_cuda:
-            self.net = self.net.cuda()
-        else:
-            self.net = self.net.cpu()
+        # 配置环境
+        torch.cuda.set_device(args.device)
+        self.device = torch.device(f"cuda:{args.device}" if torch.cuda.is_available() else "cpu")
+        self.net = self.net.to(self.device)
         # 分析模型文件夹是否存在，若不存在，则创立一个
         if not os.path.isdir(self.args.model_dir):
             os.mkdir(self.args.model_dir)
@@ -64,41 +68,88 @@ class processor(object):
         self.net_file = open(os.path.join(self.args.model_dir, 'net.txt'), 'a+')
         self.net_file.write(str(self.net))
         self.net_file.close()
-        self.log_file_curve = open(os.path.join(self.args.model_dir, 'log_curve.txt'), 'a+')
-        self.log_meta_file_curve = open(os.path.join(self.args.model_dir, 'meta_log_curve.txt'), 'a+')
-        self.log_MVDG_file_curve = open(os.path.join(self.args.model_dir, 'MVDG_log_curve.txt'), 'a+')
-        self.log_MVDGMLDG_file_curve = open(os.path.join(self.args.model_dir, 'MVDGMLDG_log_curve.txt'), 'a+')
+        # log
+        # 设置日志文件映射=>todo 后续如果改了对应的参数，此处需要同步修改
+        self.log_files = {
+            'origin': 'log_curve.txt',
+            'MLDG': 'MLDG_log_curve.txt',
+            'MVDG': 'MVDG_log_curve.txt',
+            'MVDGMLDG': 'MVDGMLDG_log_curve.txt',
+        }
+        # metric
         self.best_ade = 100
         self.best_fde = 100
+        self.mae = 100
         self.best_epoch = -1
 
+    def to_device(self, inputs, device):
+        """将输入数据转移到指定的设备上"""
+        if isinstance(inputs, (list, tuple)):
+            return [self.to_device(x, device) for x in inputs]
+        return inputs.to(device)
+
     def save_model(self, epoch, stage):
-        # 保存模型的代码与maml的代码框架合计 origin原始 meta 元学习
-        model_path = self.args.save_dir + '/' + self.args.train_model + '_'+ stage + '/' + self.args.train_model + str(stage) +'_' + \
-                     str(epoch) + '.tar'
+        # 保存模型的代码与maml的代码框架合计 origin原始 MLDG 元学习
+        model_save_path = os.path.join(self.args.model_dir,f"{self.args.train_model}{str(stage)}_{str(epoch)}.tar")
         torch.save({
             'epoch': epoch,
             'state_dict': self.net.state_dict(),
             'optimizer_state_dict': self.optimizer.state_dict()
-        }, model_path)
+        }, model_save_path)
 
     def load_model(self, stage):
         if self.args.load_model is not None:
-            self.args.model_save_path = self.args.save_dir + '/' + self.args.train_model + '_'+ stage + '/' + self.args.train_model + str(stage) + '_' + \
-                                            str(self.args.load_model) + '.tar'
+            self.args.model_save_path = os.path.join(self.args.model_dir,f"{self.args.train_model}{str(stage)}_{str(self.args.load_model)}.tar")
             print(self.args.model_save_path)
+            self.logger.info(self.args.model_save_path)
             if os.path.isfile(self.args.model_save_path):
-                print('Loading checkpoint')
-                checkpoint = torch.load(self.args.model_save_path)
-                model_epoch = checkpoint['epoch']
-                self.net.eval()
-                # self.net.load_state_dict(checkpoint['state_dict'])
-                self.net.load_state_dict(checkpoint['state_dict'], strict=True)
-                print('Loaded checkpoint at epoch', model_epoch)
+                self.logger.info('Loading checkpoint')
+                try:
+                    checkpoint = torch.load(self.args.model_save_path)
+                    model_epoch = checkpoint['epoch']
+                    self.net.eval()
+                    # todo eval 模式 以及参数匹配的严格性
+                    # self.net.load_state_dict(checkpoint['state_dict'])
+                    self.net.load_state_dict(checkpoint['state_dict'], strict=True)
+                    self.logger.info(f'Loaded checkpoint at epoch {model_epoch}')
+                except Exception as e:
+                    self.logger.error(f'Failed to load the model from {self.args.model_save_path}: {e}')
+            else:
+                self.logger.warning(f'Checkpoint file does not exist: {self.args.model_save_path}')
 
     def set_optimizer(self):
         self.optimizer = torch.optim.Adam(self.net.parameters(), lr=self.args.learning_rate)
         self.criterion = nn.MSELoss(reduction='none')
+
+    def set_logging(self,log_file='recoder.log', log_level=logging.DEBUG, console_log_level=logging.INFO):
+        # 配置 logger
+        """
+        日志信息级别：DEBUG,INFO,WARNING,ERROR,CRITICAL
+        日志信息格式：
+        """
+        logger = logging.getLogger('my_application')
+        logger.setLevel(log_level)  # 设置最低的日志级别
+        # 创建一个输出到控制台的Handler
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(console_log_level)  # 设置控制台日志级别INFO
+        console_formatter = logging.Formatter('%(levelname)s - %(message)s')
+        console_handler.setFormatter(console_formatter)
+        logger.addHandler(console_handler)
+
+        # 创建一个写入日志文件的Handler
+        file_handler = logging.FileHandler(log_file, mode='a')  # 'a'模式表示追加模式
+        file_handler.setLevel(log_level)  # 设置文件日志级别Debug
+        file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s',
+                                           datefmt='%m-%d %H:%M:%S')
+        file_handler.setFormatter(file_formatter)
+        logger.addHandler(file_handler)
+
+        return logger
+
+    def close_and_reopen_log_file(self):
+        """关闭并重新打开当前日志文件，用于轮转日志内容"""
+        self.current_log_file.close()
+        self.current_log_file = open(self.current_log_file_path, 'a+')
 
     def test(self):
 
@@ -107,7 +158,7 @@ class processor(object):
         self.net.eval()
         if self.args.train_model == 'star':
             test_error, test_final_error = self.test_epoch()
-        elif self.args.train_model == 'new_star' or self.args.train_model =='new_star_hin':
+        elif self.args.train_model in ['new_star', 'new_star_hin','Dual_TT']:
             test_error, test_final_error = self.test_new_epoch()
         print('Set: {}, epoch: {},test_error: {} test_final_error: {}'.format(self.args.test_set,
                                                                               self.args.load_model,
@@ -119,7 +170,7 @@ class processor(object):
         self.net.eval()
         if self.args.train_model == 'star':
             test_error, test_final_error = self.test_epoch()
-        elif self.args.train_model == 'new_star' or self.args.train_model =='new_star_hin':
+        elif self.args.train_model in ['new_star', 'new_star_hin','Dual_TT']:
             if self.args.vis == 'traj' or self.args.vis == 'traj_comparison':
                 if self.args.dataset == 'NBA':
                     test_error, test_final_error = self.test_new_visualNBA_epoch()
@@ -132,45 +183,35 @@ class processor(object):
                                                                               test_error, test_final_error))
 
     def train(self):
-        print('Training begin')
-        self.load_model(stage=self.args.stage)
-        self.net.train()
-        test_error, test_final_error = 0, 0
-        file_star_cvae_curve = open(os.path.join(self.args.model_dir, 'star_cvae_log_curve.txt'), 'a+')
-        support_query_log_curve = open(os.path.join(self.args.model_dir,'support_query_log_curve.txt'),'a+')
+        self.logger.info('Training begin')
         if self.args.load_model is not None:
             # 需要提取出self。args。load——model中的轮数即epoch
             # 使用正则表达式提取数字
+            self.load_model(stage=self.args.stage)
             epoch_start = int(re.search(r'\d+', self.args.load_model).group())
         else:
             epoch_start = 0
-        if self.args.stage == 'origin':
-            file_curve = self.log_file_curve
-            file_path = 'log_curve.txt'
-        elif self.args.stage == 'meta':
-            file_curve = self.log_meta_file_curve
-            file_path = 'meta_log_curve.txt'
-        elif self.args.stage == 'MVDG':
-            file_curve = self.log_MVDG_file_curve
-            file_path = 'MVDG_log_curve.txt'
-        elif self.args.stage == 'MVDGMLDG':
-            file_curve = self.log_MVDGMLDG_file_curve
-            file_path = 'MVDGMLDG_log_curve.txt'
+        test_error, test_final_error = 0, 0
+
+        file_star_cvae_curve = open(os.path.join(self.args.model_dir, 'star_cvae_log_curve.txt'), 'a+')
+        support_query_log_curve = open(os.path.join(self.args.model_dir,'support_query_log_curve.txt'),'a+')
+        # 根据当前stage打开相应的日志文件
+        self.current_log_file_path = os.path.join(self.args.model_dir, self.log_files[self.args.stage])
+        self.current_log_file = open(self.current_log_file_path, 'a+')
+
         for epoch in range(epoch_start, self.args.num_epochs):
             self.net.train()
             if self.args.stage == 'origin':
-                train_loss,loss_pred_epoch,loss_recover_epoch,loss_kl_epoch,loss_diverse_epoch = self.train_epoch(epoch)
+                train_loss,loss_pred_epoch,loss_recover_epoch,loss_kl_epoch,loss_diverse_epoch,loss_TT_epoch = self.train_epoch(epoch)
                 support_loss, query_loss = 0,0
-                file_star_cvae_curve.write(
-                    str(epoch) + ',' + str(train_loss) + ',' + str(loss_pred_epoch) + ',' + str(loss_recover_epoch) +
-                    ',' + str(loss_kl_epoch) + ',' + str(loss_diverse_epoch) + '\n')
-            elif self.args.stage == 'meta':
-                # train_loss = self.train_meta_epoch(epoch)
+                file_star_cvae_curve.write(f"{epoch},{train_loss},{loss_pred_epoch},{loss_recover_epoch},{loss_kl_epoch},{loss_diverse_epoch},{loss_TT_epoch}\n")
+            elif self.args.stage == 'MLDG':
+                # train_loss = self.train_MLDG_epoch(epoch)
                 if self.args.meta_way == 'sequential1':
                     train_loss,support_loss,query_loss = self.train_MLDG_mixup_new_epoch_sequential(epoch)
                 elif self.args.meta_way == 'parallel2':
                     train_loss, support_loss, query_loss = self.train_MLDG_mixup_new_epoch_parallel(epoch)
-                support_query_log_curve.write(str(epoch)+','+str(support_loss)+','+str(query_loss)+'\n')
+                support_query_log_curve.write(f"{epoch},{support_loss},{query_loss}\n")
             elif self.args.stage == 'MVDG':
                 train_loss = self.train_MVDG_epoch_new(epoch)
                 support_loss, query_loss = 0,0
@@ -184,11 +225,10 @@ class processor(object):
             if epoch >= self.args.start_test:
                 # 如果当前轮数大于或等于 args.start_test，则将模型设置为评估模式（self.net.eval()），后续每轮都会跑
                 self.net.eval()
-                # todo 这里的test-epoch的数据输入与最终的test的时候是一致的，那么其相应的不就是在训练的使用了测试数据吗，
-                #  此处的数据应该是train分出来的val才对
+                # todo 这里的test-epoch的数据输入与最终的test的时候是一致的，那么其相应的不就是在训练的使用了测试数据吗，此处的数据应该是train分出来的val才对
                 if self.args.train_model == 'star':
                     test_error, test_final_error = self.test_epoch()
-                elif self.args.train_model == 'new_star' or self.args.train_model =='new_star_hin':
+                elif self.args.train_model in ['new_star', 'new_star_hin','Dual_TT']:
                     test_error, test_final_error = self.test_new_epoch()
                 # 调用 test_epoch 函数计算模型在测试集上的 ADE 和 FDE，并将其存储在 test_error 和 test_final_error 变量中。
                 # 然后，判断当前的 FDE 是否优于历史最佳 FDE，如果是，则更新 best_ade、best_fde 和 best_epoch 变量的值，并调用 save_model 函数保存模型。
@@ -197,46 +237,42 @@ class processor(object):
                     self.best_fde = test_final_error
                     self.best_epoch = epoch
                     self.save_model(epoch,stage=self.args.stage)
-            # 将训练损失、ADE、FDE 和学习率等信息写入日志文件 log_file_curve 中
-            file_curve.write(
-                str(epoch) + ',' + str(train_loss) + ','+str(support_loss)+','+str(query_loss)+',' + str(test_error) +',' + str(test_final_error) + ',' + str(self.args.learning_rate) + '\n')
-            # 并判断当前轮数是否为 10 的倍数，如果是，则关闭日志文件并重新打开以防止文件过大
-            # if epoch % 10 == 0:
-            if epoch % 2 == 0:
-                file_curve.close()
-                file_star_cvae_curve.close()
-                support_query_log_curve.close()
-                file_curve = open(os.path.join(self.args.model_dir, file_path), 'a+')
-                file_star_cvae_curve = open(os.path.join(self.args.model_dir, 'star_cvae_log_curve.txt'), 'a+')
-                support_query_log_curve = open(os.path.join(self.args.model_dir,'support_query_log_curve.txt'),'a+')
-
-            # 如果 start_test 大于等于当前轮数，打印当前轮数的训练损失、ADE 和 FDE，否则则只打印训练损失。
-            if epoch >= self.args.start_test:
-                print(
-                    '----epoch {}, train_loss={:.5f}, ADE={:.3f}, FDE={:.3f}, Best_ADE={:.3f}, Best_FDE={:.3f} at Epoch {}'
-                    .format(epoch, train_loss, test_error, test_final_error, self.best_ade, self.best_fde,
-                            self.best_epoch))
+                # 如果 start_test 大于等于当前轮数，打印当前轮数的训练损失、ADE 和 FDE，否则则只打印训练损失。
+                self.logger.info(
+                    f'epoch {epoch}, train_loss={train_loss:.9f}, ADE={test_error:.9f}, FDE={test_final_error:.9f}, Best_ADE={self.best_ade:.9f}, Best_FDE={self.best_fde:.9f} at Epoch {self.best_epoch}')
             else:
-                print('----epoch {}, train_loss={:.5f}'
-                      .format(epoch, train_loss))
+                self.logger.info(f'epoch {epoch}, train_loss={train_loss:.9f}')
+            # 将训练损失、ADE、FDE 和学习率等信息写入日志文件 log_file_curve 中
+            # f-string会自动将变量的值转换为字符串，并根据您在大括号{}中放置的表达式来格式化这些值。
+            self.current_log_file.write(f"{epoch},{train_loss},{support_loss},{query_loss},{test_error},{test_final_error},{self.args.learning_rate}\n")
+            # 并判断当前轮数是否为4 的倍数，如果是，则关闭日志文件并重新打开以防止文件过大
+            if epoch % 4 == 0:
+                self.close_and_reopen_log_file()
+                file_star_cvae_curve.close()
+                file_star_cvae_curve = open(os.path.join(self.args.model_dir, 'star_cvae_log_curve.txt'), 'a+')
+                support_query_log_curve.close()
+                support_query_log_curve = open(os.path.join(self.args.model_dir,'support_query_log_curve.txt'),'a+')
+        # 完成所有训练之后的loss绘画分析
+        draw_loss(os.path.join(self.args.model_dir, 'star_cvae_log_curve.txt'),self.args.num_epochs)
+        draw_loss(os.path.join(self.args.model_dir, 'star_cvae_log_curve.txt'), int(self.args.num_epochs/5))
+
 
     def train_epoch(self, epoch):
         # 重置训练数据集的指针，使得数据训练从第一帧开始；
         self.dataloader.reset_batch_pointer(set='train', valid=False)
         loss_epoch = 0
-        loss_pred_list, loss_recover_list, loss_kl_list, loss_diversity_list = 0,0,0,0
-        for batch in range(self.dataloader.trainbatchnums):
+        loss_pred_list, loss_recover_list, loss_kl_list, loss_diversity_list,loss_TT_list = 0,0,0,0,0
+        for batch in range(self.dataloader.train_batchnums):
 
             start = time.time()
             # todo 获取对应训练batch的数据 相应的有旋转操作以及基于观测点位置坐标的归一化操作
-            #  -- 此处需要更改 -- 先观察原始的batch的格式 而后基于其更改
             inputs, batch_id = self.dataloader.get_train_batch(batch)
-            # 将数据转成pytorch的tensor格式
+            # todo 每个batch单独的转移?数据传输很慢？
+            # 将数据转成pytorch的tensor格式 转移到GPU上
             inputs = tuple([torch.Tensor(i) for i in inputs])
-            # 将其转移到GPU上
-            inputs = tuple([i.cuda() for i in inputs])
-            loss_pred_recover = torch.zeros(1).cuda()
-            loss = torch.zeros(1).cuda()
+            inputs = self.to_device(inputs, self.device)
+            loss_pred_recover = torch.zeros(1,device=self.device)
+            loss = torch.zeros(1,device=self.device)
             """
             分析相应的各个数据项的含义，并寻找是否可以基于此进行task的拆分，而不是从最原始的数据处理开始拆分task
             batch_abs：(seq_length, num_Peds，2) 每帧，每个行人 xy坐标，未归一化
@@ -257,12 +293,15 @@ class processor(object):
             # 梯度清零
             self.net.zero_grad()
             # outputs (seq_length,batch-pednum,2)(eg:0-18,0-264,2) 和inputs-forward[0]的形式一致
-            if self.args.train_model == 'new_star' or self.args.train_model == 'new_star_hin':
+            if self.args.train_model in ['new_star', 'new_star_hin']:
                 # 不需要删除最后一秒
                 # lossmask 覆盖的是从第1帧开始持续到当前帧都存在的损失，但此处我们的损失应该只是保留从头开始到尾都存在的，故而数据最好进行预处理，在输入进去
                 total_loss, loss_pred, loss_recover, loss_kl, loss_diverse,_,_ = self.net.forward(inputs,stage='support',mean_list=[],var_list=[],ifmixup=False)
-                loss = total_loss
+                loss,loss_TT = total_loss,0
 
+            elif self.args.train_model=='Dual_TT':
+                total_loss, loss_pred, loss_recover, loss_kl, loss_diverse,loss_TT = self.net.forward(inputs,stage='support')
+                loss = total_loss
 
             elif self.args.train_model == 'star':
                 # 整体将序列中的最后一帧的数据删除 20帧-》19帧
@@ -276,13 +315,13 @@ class processor(object):
                 loss_o = torch.sum(self.criterion(outputs, batch_norm[1:, :, :2]), dim=2)
                 loss_pred_recover += (torch.sum(loss_o * lossmask / num))
                 loss = loss_pred_recover
-                loss_pred,loss_recover,loss_kl,loss_diverse = 0,0,0,0
-
+                loss_pred,loss_recover,loss_kl,loss_diverse,loss_TT = 0,0,0,0,0
 
             loss_pred_list += loss_pred
             loss_recover_list += loss_recover
             loss_kl_list +=  loss_kl
             loss_diversity_list += loss_diverse
+            loss_TT_list += loss_TT
             loss_epoch += loss.item()
             # 损失反向传播 梯度裁剪 优化器的step函数
             loss.backward()
@@ -300,18 +339,18 @@ class processor(object):
             end = time.time()
 
             if batch % self.args.show_step == 0 and self.args.ifshow_detail:
-                print(
-                    'train-{}/{} (epoch {}), train_loss = {:.5f}, time/batch = {:.5f} '.format(batch,
-                                                                                               self.dataloader.trainbatchnums,
-                                                                                               epoch, loss.item(),
-                                                                                               end - start))
+                self.logger.info('train-{}/{} (epoch {}), train_loss = {:.5f}, time/batch = {:.5f}'.format(
+                    batch,self.dataloader.train_batchnums,epoch, loss.item(),end - start)
+)
         # 计算所有训练batch的平均损失
-        train_loss_epoch = loss_epoch / self.dataloader.trainbatchnums
-        loss_pred_epoch = loss_pred_list / self.dataloader.trainbatchnums
-        loss_recover_epoch = loss_recover_list / self.dataloader.trainbatchnums
-        loss_kl_epoch = loss_kl_list /  self.dataloader.trainbatchnums
-        loss_diverse_epoch = loss_diversity_list / self.dataloader.trainbatchnums
-        return train_loss_epoch,loss_pred_epoch,loss_recover_epoch,loss_kl_epoch,loss_diverse_epoch
+        train_loss_epoch = loss_epoch / self.dataloader.train_batchnums
+        loss_pred_epoch = loss_pred_list / self.dataloader.train_batchnums
+        loss_recover_epoch = loss_recover_list / self.dataloader.train_batchnums
+        loss_kl_epoch = loss_kl_list /  self.dataloader.train_batchnums
+        loss_diverse_epoch = loss_diversity_list / self.dataloader.train_batchnums
+        loss_TT_epoch = loss_TT_list / self.dataloader.train_batchnums
+
+        return train_loss_epoch,loss_pred_epoch,loss_recover_epoch,loss_kl_epoch,loss_diverse_epoch,loss_TT_epoch
 
     def meta_mixup_forward(self, model, data, stage, mean_list, var_list, ifmixup=False):
         """
@@ -356,7 +395,7 @@ class processor(object):
         """
         self.dataloader.reset_batch_pointer(set='train', valid=False)
         loss_epoch,query_loss_epoch,support_loss_epoch = 0,0,0
-        for batch_task_id, batch_task_data in enumerate(self.dataloader.train_batch_task):
+        for batch_task_id, batch_task_data in enumerate(self.dataloader.train_batch_MLDG_task):
             print('begin' + str(epoch) + str(batch_task_id))
             start = time.time()
             self.net.zero_grad()
@@ -430,11 +469,11 @@ class processor(object):
             if batch_task_id % self.args.show_step == 0 and self.args.ifshow_detail:
                 print(
                     'train-{}/{} (epoch {}), train_loss = {:.5f}, time/batch = {:.5f} '.format(
-                        batch_task_id, len(self.dataloader.train_batch_task), epoch, task_loss_info.item(),
+                        batch_task_id, len(self.dataloader.train_batch_MLDG_task), epoch, task_loss_info.item(),
                         end - start))
-        train_loss_epoch = loss_epoch / len(self.dataloader.train_batch_task)
-        train_support_loss_epoch = support_loss_epoch / len(self.dataloader.train_batch_task)
-        train_query_loss_epoch = query_loss_epoch / len(self.dataloader.train_batch_task)
+        train_loss_epoch = loss_epoch / len(self.dataloader.train_batch_MLDG_task)
+        train_support_loss_epoch = support_loss_epoch / len(self.dataloader.train_batch_MLDG_task)
+        train_query_loss_epoch = query_loss_epoch / len(self.dataloader.train_batch_MLDG_task)
         print('epoch {} ,loss = {:.5f},support_loss = {:.5f},query_loss = {:.5f}'.format(epoch,train_loss_epoch,
                                                                                          train_support_loss_epoch,train_query_loss_epoch))
         return train_loss_epoch,train_support_loss_epoch,train_query_loss_epoch
@@ -442,12 +481,12 @@ class processor(object):
     def train_MLDG_mixup_new_epoch_parallel(self, epoch):
         """
         todo 还未添加mixup代码
-        结合MLDG框架重写该部分代码 -- new-model 在测试时加入，对应的并行方法
+        结合MLDG框架重写该部分代码 -- new-ModelStrategy 在测试时加入，对应的并行方法
         """
         self.dataloader.reset_batch_pointer(set='train', valid=False)
         loss_epoch, support_loss_epoch ,query_loss_epoch = 0,0,0
         start = time.time()
-        for batch_task_id, batch_task_data in enumerate(self.dataloader.train_batch_task):
+        for batch_task_id, batch_task_data in enumerate(self.dataloader.train_batch_MLDG_task):
             print('begin' + str(epoch) + str(batch_task_id))
             self.net.zero_grad()
             task_support_loss = []
@@ -503,13 +542,13 @@ class processor(object):
             torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.args.clip)
             self.optimizer.step()
             print('train-{}/{},epoch{},task_support_loss = {:.5f},task_query_loss = {:.5f}'.format(batch_task_id,
-                                                                                                   len(self.dataloader.train_batch_task),
+                                                                                                   len(self.dataloader.train_batch_MLDG_task),
                                                                                                    epoch,
                                                                                                    task_support_loss,
                                                                                                    task_query_loss))
-        train_support_loss_epoch = support_loss_epoch / len(self.dataloader.train_batch_task)
-        train_query_loss_epoch = query_loss_epoch / len(self.dataloader.train_batch_task)
-        train_loss_epoch = loss_epoch / len(self.dataloader.train_batch_task)
+        train_support_loss_epoch = support_loss_epoch / len(self.dataloader.train_batch_MLDG_task)
+        train_query_loss_epoch = query_loss_epoch / len(self.dataloader.train_batch_MLDG_task)
+        train_loss_epoch = loss_epoch / len(self.dataloader.train_batch_MLDG_task)
         end = time.time()
         print('epoch{},loss = {:.5f} support_loss = {:.5f},query_loss = {:.5f},time/epoch = {:.5f}'.format(epoch,train_loss_epoch,
                                                                                                          train_support_loss_epoch,
@@ -525,7 +564,7 @@ class processor(object):
         # 第一步依据完整数据拆分出batch list
         self.dataloader.reset_batch_pointer(set='train', valid=False)
         loss_epoch = 0
-        for batch_task_id, batch_task_data in enumerate(self.dataloader.train_batch_task):
+        for batch_task_id, batch_task_data in enumerate(self.dataloader.train_batch_MLDG_task):
             # todo 明晰参数复制的过程，以及初步更新和二次更新的不同点，
             #  相应的support loss计算 query loss计算以及二次更新的结果 以及对应的后续将其函数化
             # 针对batch-task-data中的4个task进行处理 list
@@ -534,7 +573,7 @@ class processor(object):
             self.net.zero_grad()
             # !!!!(1)注意的是 state——dict是浅拷贝，即net-initial-dict改变的话，那么当你修改param，相应地也会修改model的参数。
             # model这个对象实际上是指向各个参数矩阵的，而浅拷贝只会拷贝最外层的这些“指针；
-            # from copy import deepcopy  best_state = copy.deepcopy(model.state_dict()) 深拷贝 互不影响
+            # from copy import deepcopy  best_state = copy.deepcopy(ModelStrategy.state_dict()) 深拷贝 互不影响
             net_initial_dict = copy.deepcopy(self.net.state_dict())
             task_query_loss = []
             for task_id, task_batch_data in enumerate(batch_task_data):
@@ -585,9 +624,9 @@ class processor(object):
             if batch_task_id % self.args.show_step == 0 and self.args.ifshow_detail:
                 print(
                     'train-{}/{} (epoch {}), train_loss = {:.5f}, time/batch = {:.5f} '.format(
-                        batch_task_id, len(self.dataloader.train_batch_task), epoch, task_query_loss.item(),
+                        batch_task_id, len(self.dataloader.train_batch_MLDG_task), epoch, task_query_loss.item(),
                         end - start))
-        train_loss_epoch = loss_epoch / len(self.dataloader.train_batch_task)
+        train_loss_epoch = loss_epoch / len(self.dataloader.train_batch_MLDG_task)
         return train_loss_epoch
 
     def meta_forward(self, model, data, stage):
@@ -937,7 +976,9 @@ class processor(object):
         self.dataloader.reset_batch_pointer(set='test')
         error_epoch, final_error_epoch = 0, 0,
         error_cnt_epoch, final_error_cnt_epoch = 1e-5, 1e-5
-        for batch in tqdm(range(self.dataloader.testbatchnums)):
+        error_rmse_epoch,error_mae_epoch = 0,0,
+        error_rmse_count_epoch,error_mae_count_epoch = 1e-5, 1e-5
+        for batch in tqdm(range(self.dataloader.test_batchnums)):
             # 与train相同的batch处理步骤
             inputs, batch_id = self.dataloader.get_test_batch(batch)
             inputs = tuple([torch.Tensor(i) for i in inputs])
@@ -964,14 +1005,25 @@ class processor(object):
             # lossmask [19,257]
             lossmask, num = getLossMask(all_output, seq_list[0], seq_list[1:], using_cuda=self.args.using_cuda)
             # todo 相较于train的MSE 此处只计算在整个时间窗口都存在的行人的损失
+            # 需要添加 mse=》rmse，mae的
             error, error_cnt, final_error, final_error_cnt = L2forTestS(all_output, batch_norm[1:, :, :2],
-                                                                        self.args.obs_length, lossmask)
+                                                                        self.args.obs_length, lossmask,self.args.sample_num)
 
             error_epoch += error
             error_cnt_epoch += error_cnt
             final_error_epoch += final_error
             final_error_cnt_epoch += final_error_cnt
-
+            # 添加对应的 rmse mae
+            error_rmse, error_rmse_count, error_mae, error_mae_count = L2forTest_RMSE_MAE(all_output,
+                                      batch_norm[1:, :, :2],self.args.obs_length,lossmask,self.args.sample_num)
+            error_rmse_epoch += error_rmse
+            error_rmse_count_epoch += error_rmse_count
+            error_mae_epoch += error_mae
+            error_mae_count_epoch += error_mae_count
+        
+        print("RMSE"+str(error_rmse_epoch/error_rmse_count_epoch))
+        print("MAE"+str(error_mae_epoch/error_mae_count_epoch))
+        
         return error_epoch / error_cnt_epoch, final_error_epoch / final_error_cnt_epoch
 
     @torch.no_grad()
@@ -979,7 +1031,9 @@ class processor(object):
         self.dataloader.reset_batch_pointer(set='test')
         error_epoch, final_error_epoch = 0, 0,
         error_cnt_epoch, final_error_cnt_epoch = 1e-5, 1e-5
-        for batch in tqdm(range(self.dataloader.testbatchnums)):
+        error_rmse_epoch, error_mae_epoch = 0, 0,
+        error_rmse_count_epoch, error_mae_count_epoch = 1e-5, 1e-5
+        for batch in tqdm(range(self.dataloader.test_batchnums)):
             # 与train相同的batch处理步骤
             inputs, batch_id = self.dataloader.get_test_batch(batch)
             inputs = tuple([torch.Tensor(i) for i in inputs])
@@ -991,6 +1045,19 @@ class processor(object):
                 # prediction (sample_num, agent_num, self.pred_length, 2) -> (sample_num, self.pred_length,agent_num, 2)
                 # target_pred_traj  (self.pred_length,agent_num, 2) 进去的时候为512人，出来的时候只有115人 那么需要对应这115人的信息
                 prediction = prediction.permute(0, 2, 1, 3)
+            # error
+            error, error_cnt, final_error, final_error_cnt = L2forTestS_NEWSTAR(prediction=prediction,target_pred_traj=target_pred_traj,num_samples=self.args.sample_num)
+            error_epoch += error
+            error_cnt_epoch += error_cnt
+            final_error_epoch += final_error
+            final_error_cnt_epoch += final_error_cnt
+            # rmse-error
+            error_rmse, error_rmse_count, error_mae, error_mae_count = L2forTest_RMSE_MAE_NEWSTAR(outputs=prediction,targets=target_pred_traj,num_samples=self.args.sample_num)
+            error_rmse_epoch += error_rmse
+            error_rmse_count_epoch += error_rmse_count
+            error_mae_epoch += error_mae
+            error_mae_count_epoch += error_mae_count
+            """
             #  L2 范数  error (num_samples, pred_length, num_Peds) inputs (261人 6-43)epoch 0 batch 0 (20 2 138 2)
             error_full = torch.norm(prediction - target_pred_traj, p=2, dim=3)
             # 选择预测误差最小的一组 并保存 ; ，每个行人在其20次采样中挑选最好的
@@ -1014,6 +1081,9 @@ class processor(object):
             error_cnt_epoch += error_cnt
             final_error_epoch += final_error.item()
             final_error_cnt_epoch += final_error_cnt
+            """
+        print("RMSE" + str(error_rmse_epoch / error_rmse_count_epoch))
+        print("MAE" + str(error_mae_epoch / error_mae_count_epoch))
         return error_epoch / error_cnt_epoch, final_error_epoch / final_error_cnt_epoch
 
     @torch.no_grad()
@@ -1022,7 +1092,7 @@ class processor(object):
         error_epoch, final_error_epoch = 0, 0,
         error_cnt_epoch, final_error_cnt_epoch = 1e-5, 1e-5
         sdd_vis = []
-        for batch in tqdm(range(self.dataloader.testbatchnums)):
+        for batch in tqdm(range(self.dataloader.test_batchnums)):
             # 与train相同的batch处理步骤
             inputs, batch_id = self.dataloader.get_test_batch(batch)
             scene_frame = pd.DataFrame(columns=['scene', 'frame'])
@@ -1090,7 +1160,7 @@ class processor(object):
         visual_batch_inputs = []
         visual_batch_outputs = []
         visual_batch_error = []
-        for batch in tqdm(range(self.dataloader.testbatchnums)):
+        for batch in tqdm(range(self.dataloader.test_batchnums)):
             # 第一步：获取对应的预测结果 预测结果取的是20次预测中每个独立个体最好的一次 然后进行保存
             # 与train相同的batch处理步骤
             inputs, batch_id = self.dataloader.get_test_batch(batch)
@@ -1225,7 +1295,7 @@ class processor(object):
         # 第一步依据完整数据拆分出batch list
         self.dataloader.reset_batch_pointer(set='train', valid=False)
         loss_epoch = 0
-        for batch_task_id, batch_task_data in enumerate(self.dataloader.train_batch_task):
+        for batch_task_id, batch_task_data in enumerate(self.dataloader.train_batch_MLDG_task):
             # todo 明晰参数复制的过程，以及初步更新和二次更新的不同点，
             #  相应的support loss计算 query loss计算以及二次更新的结果 以及对应的后续将其函数化
             # 针对batch-task-data中的4个task进行处理 list
@@ -1234,7 +1304,7 @@ class processor(object):
             self.net.zero_grad()
             # !!!!(1)注意的是 state——dict是浅拷贝，即net-initial-dict改变的话，那么当你修改param，相应地也会修改model的参数。
             # model这个对象实际上是指向各个参数矩阵的，而浅拷贝只会拷贝最外层的这些“指针；
-            # from copy import deepcopy  best_state = copy.deepcopy(model.state_dict()) 深拷贝 互不影响
+            # from copy import deepcopy  best_state = copy.deepcopy(ModelStrategy.state_dict()) 深拷贝 互不影响
             net_initial_dict = copy.deepcopy(self.net.state_dict())
             task_query_loss = []
             for task_id, task_batch_data in enumerate(batch_task_data):
@@ -1292,9 +1362,9 @@ class processor(object):
             if batch_task_id % self.args.show_step == 0 and self.args.ifshow_detail:
                 print(
                     'train-{}/{} (epoch {}), train_loss = {:.5f}, time/batch = {:.5f} '.format(
-                        batch_task_id, len(self.dataloader.train_batch_task), epoch, task_query_loss.item(),
+                        batch_task_id, len(self.dataloader.train_batch_MLDG_task), epoch, task_query_loss.item(),
                         end - start))
-        train_loss_epoch = loss_epoch / len(self.dataloader.train_batch_task)
+        train_loss_epoch = loss_epoch / len(self.dataloader.train_batch_MLDG_task)
         return train_loss_epoch
 
     def train_meta_mixup_epoch_withloss(self, epoch):
@@ -1305,7 +1375,7 @@ class processor(object):
         # 第一步依据完整数据拆分出batch list
         self.dataloader.reset_batch_pointer(set='train', valid=False)
         loss_epoch = 0
-        for batch_task_id, batch_task_data in enumerate(self.dataloader.train_batch_task):
+        for batch_task_id, batch_task_data in enumerate(self.dataloader.train_batch_MLDG_task):
             # todo 明晰参数复制的过程，以及初步更新和二次更新的不同点，
             #  相应的support loss计算 query loss计算以及二次更新的结果 以及对应的后续将其函数化
             # 针对batch-task-data中的4个task进行处理 list
@@ -1314,7 +1384,7 @@ class processor(object):
             self.net.zero_grad()
             # !!!!(1)注意的是 state——dict是浅拷贝，即net-initial-dict改变的话，那么当你修改param，相应地也会修改model的参数。
             # model这个对象实际上是指向各个参数矩阵的，而浅拷贝只会拷贝最外层的这些“指针；
-            # from copy import deepcopy  best_state = copy.deepcopy(model.state_dict()) 深拷贝 互不影响
+            # from copy import deepcopy  best_state = copy.deepcopy(ModelStrategy.state_dict()) 深拷贝 互不影响
             net_initial_dict = copy.deepcopy(self.net.state_dict())
             task_query_loss = []
             # todo 需要注意之前MLDG框架中忘记添加support的loss了；最小化元训练和元测试领域的损失；传统的优化器会很高兴地进行非对称调整，
@@ -1379,9 +1449,9 @@ class processor(object):
             if batch_task_id % self.args.show_step == 0 and self.args.ifshow_detail:
                 print(
                     'train-{}/{} (epoch {}), train_loss = {:.5f}, time/batch = {:.5f} '.format(
-                        batch_task_id, len(self.dataloader.train_batch_task), epoch, task_loss.item(),
+                        batch_task_id, len(self.dataloader.train_batch_MLDG_task), epoch, task_loss.item(),
                         end - start))
-        train_loss_epoch = loss_epoch / len(self.dataloader.train_batch_task)
+        train_loss_epoch = loss_epoch / len(self.dataloader.train_batch_MLDG_task)
         return train_loss_epoch
 
 # MVDG代码 只适用于原始的star
@@ -1470,7 +1540,7 @@ def train_MLDG_mixup_epoch_1(self, epoch):
     
     self.dataloader.reset_batch_pointer(set='train', valid=False)
     loss_epoch,query_loss_epoch,support_loss_epoch = 0,0,0
-    for batch_task_id, batch_task_data in enumerate(self.dataloader.train_batch_task):
+    for batch_task_id, batch_task_data in enumerate(self.dataloader.train_batch_MLDG_task):
         print('begin' + str(epoch) + str(batch_task_id))
         start = time.time()
         self.net.zero_grad()
@@ -1532,22 +1602,22 @@ def train_MLDG_mixup_epoch_1(self, epoch):
         if batch_task_id % self.args.show_step == 0 and self.args.ifshow_detail:
             print(
                 'train-{}/{} (epoch {}), train_loss = {:.5f}, time/batch = {:.5f} '.format(
-                    batch_task_id, len(self.dataloader.train_batch_task), epoch, task_loss_info.item(),
+                    batch_task_id, len(self.dataloader.train_batch_MLDG_task), epoch, task_loss_info.item(),
                     end - start))
-    train_loss_epoch = loss_epoch / len(self.dataloader.train_batch_task)
-    train_support_loss_epoch = support_loss_epoch / len(self.dataloader.train_batch_task)
-    train_query_loss_epoch = query_loss_epoch / len(self.dataloader.train_batch_task)
+    train_loss_epoch = loss_epoch / len(self.dataloader.train_batch_MLDG_task)
+    train_support_loss_epoch = support_loss_epoch / len(self.dataloader.train_batch_MLDG_task)
+    train_query_loss_epoch = query_loss_epoch / len(self.dataloader.train_batch_MLDG_task)
     print('epoch {} ,loss = {:.5f},support_loss = {:.5f},query_loss = {:.5f}'.format(epoch,train_loss_epoch,
                                                                                      support_loss_epoch,query_loss_epoch))
     return train_loss_epoch,train_support_loss_epoch,train_query_loss_epoch
 def train_MLDG_mixup_epoch_2(self, epoch):
     
-    结合MLDG框架重写该部分代码 -- new-model 在测试时加入，对应的并行方法
+    结合MLDG框架重写该部分代码 -- new-ModelStrategy 在测试时加入，对应的并行方法
     
     self.dataloader.reset_batch_pointer(set='train', valid=False)
     loss_epoch, support_loss_epoch ,query_loss_epoch = 0,0,0
     start = time.time()
-    for batch_task_id, batch_task_data in enumerate(self.dataloader.train_batch_task):
+    for batch_task_id, batch_task_data in enumerate(self.dataloader.train_batch_MLDG_task):
         print('begin' + str(epoch) + str(batch_task_id))
         self.net.zero_grad()
         task_support_loss = []
@@ -1595,13 +1665,13 @@ def train_MLDG_mixup_epoch_2(self, epoch):
         torch.nn.utils.clip_grad_norm_(self.net.parameters(), self.args.clip)
         self.optimizer.step()
         print('train-{}/{},epoch{},task_support_loss = {:.5f},task_query_loss = {:.5f}'.format(batch_task_id,
-                                                                                               len(self.dataloader.train_batch_task),
+                                                                                               len(self.dataloader.train_batch_MLDG_task),
                                                                                                epoch,
                                                                                                task_support_loss,
                                                                                                task_query_loss))
-    train_support_loss_epoch = support_loss_epoch / len(self.dataloader.train_batch_task)
-    train_query_loss_epoch = query_loss_epoch / len(self.dataloader.train_batch_task)
-    train_loss_epoch = loss_epoch / len(self.dataloader.train_batch_task)
+    train_support_loss_epoch = support_loss_epoch / len(self.dataloader.train_batch_MLDG_task)
+    train_query_loss_epoch = query_loss_epoch / len(self.dataloader.train_batch_MLDG_task)
+    train_loss_epoch = loss_epoch / len(self.dataloader.train_batch_MLDG_task)
     end = time.time()
     print('epoch{},loss = {:.5f} support_loss = {:.5f},query_loss = {:.5f},time/epoch = {:.5f}'.format(epoch,train_loss_epoch,
                                                                                                      train_support_loss_epoch,
@@ -1619,7 +1689,7 @@ def train_MLDG_mixup_epoch_2(self, epoch):
     # 第一步依据完整数据拆分出batch list
     self.dataloader.reset_batch_pointer(set='train', valid=False)
     loss_epoch = 0
-    for batch_task_id, batch_task_data in enumerate(self.dataloader.train_batch_task):
+    for batch_task_id, batch_task_data in enumerate(self.dataloader.train_batch_MLDG_task):
         # todo 明晰参数复制的过程，以及初步更新和二次更新的不同点，
         #  相应的support loss计算 query loss计算以及二次更新的结果 以及对应的后续将其函数化
         # 针对batch-task-data中的4个task进行处理 list
@@ -1670,9 +1740,9 @@ def train_MLDG_mixup_epoch_2(self, epoch):
         if batch_task_id % self.args.show_step == 0 and self.args.ifshow_detail:
             print(
                 'train-{}/{} (epoch {}), train_loss = {:.5f}, time/batch = {:.5f} '.format(
-                    batch_task_id, len(self.dataloader.train_batch_task), epoch, task_query_loss.item(),
+                    batch_task_id, len(self.dataloader.train_batch_MLDG_task), epoch, task_query_loss.item(),
                     end - start))
-    train_loss_epoch = loss_epoch / len(self.dataloader.train_batch_task)
+    train_loss_epoch = loss_epoch / len(self.dataloader.train_batch_MLDG_task)
     return train_loss_epoch
 """
 # multi gpus
@@ -1697,7 +1767,7 @@ def train_meta_epoch_multi_gpus(self,epoch):
     loss_epoch = 0
     gpus_nums = torch.cuda.device_count()
     gpus = [i for i in range(gpus_nums)]
-    for batch_task_id,batch_task_data in enumerate(self.dataloader.train_batch_task):
+    for batch_task_id,batch_task_data in enumerate(self.dataloader.train_batch_MLDG_task):
         # todo 明晰参数复制的过程，以及初步更新和二次更新的不同点，
         #  相应的support loss计算 query loss计算以及二次更新的结果 以及对应的后续将其函数化
         # 针对batch-task-data中的4个task进行处理 list
@@ -1706,7 +1776,7 @@ def train_meta_epoch_multi_gpus(self,epoch):
         self.net.zero_grad()
         # !!!!(1)注意的是 state——dict是浅拷贝，即net-initial-dict改变的话，那么当你修改param，相应地也会修改model的参数。
         # model这个对象实际上是指向各个参数矩阵的，而浅拷贝只会拷贝最外层的这些“指针；
-        # from copy import deepcopy  best_state = copy.deepcopy(model.state_dict()) 深拷贝 互不影响
+        # from copy import deepcopy  best_state = copy.deepcopy(ModelStrategy.state_dict()) 深拷贝 互不影响
         self.task_weight = [copy.deepcopy(self.net.state_dict()) for i in range(gpus_nums)]
         self.task_query_loss =[0,0,0,0]
         # 此处可以加速 串行改成四卡并行  8s--2s
@@ -1725,12 +1795,12 @@ def train_meta_epoch_multi_gpus(self,epoch):
         if batch_task_id % self.args.show_step == 0 and self.args.ifshow_detail:
             print(
                 'train-{}/{} (epoch {}), train_loss = {:.5f}, time/batch = {:.5f} '.format(
-                    batch_task_id, len(self.dataloader.train_batch_task), epoch,task_query_loss.item(),end - start))
-    train_loss_epoch = loss_epoch/len(self.dataloader.train_batch_task)
+                    batch_task_id, len(self.dataloader.train_batch_MLDG_task), epoch,task_query_loss.item(),end - start))
+    train_loss_epoch = loss_epoch/len(self.dataloader.train_batch_MLDG_task)
     return train_loss_epoch
 
-def meta_forward_multi_gpus(self,model,data,stage,device,optim=None):
-    model.train()
+def meta_forward_multi_gpus(self,ModelStrategy,data,stage,device,optim=None):
+    ModelStrategy.train()
     if optim is not None:
         optim.zero_grad()
     data_set = self.dataloader.rotate_shift_batch(data[0])
@@ -1743,7 +1813,7 @@ def meta_forward_multi_gpus(self,model,data,stage,device,optim=None):
     # todo forward需要与对应的参数结合起来  内外参数
     # print('begin '+stage)
     # todo iftest ?
-    outputs = model.forward(set_forward, iftest=False,device=device)
+    outputs = ModelStrategy.forward(set_forward, iftest=False,device=device)
     lossmask, num = getLossMask(outputs, seq_list[0], seq_list[1:],using_cuda=self.args.using_cuda,device=device)
     loss_o = torch.sum(self.criterion(outputs, batch_norm[1:, :, :2]), dim=2)
     loss = loss + torch.sum(loss_o * lossmask / num)
@@ -1752,7 +1822,7 @@ def meta_forward_multi_gpus(self,model,data,stage,device,optim=None):
         optim.step()
 
     if stage == 'support':
-        names_weights_copy = self.get_inner_loop_parameter_dict(model.named_parameters(),device=device)
+        names_weights_copy = self.get_inner_loop_parameter_dict(ModelStrategy.named_parameters(),device=device)
         # create_graph,retain_graph的取值
         grads = torch.autograd.grad(loss, names_weights_copy.values(), create_graph=False,
                                     retain_graph=False, allow_unused=True)
@@ -1762,8 +1832,8 @@ def meta_forward_multi_gpus(self,model,data,stage,device,optim=None):
         del grads
     elif stage == 'query':
         loss.backward()
-        inner_dict_grads = {name:param.grad for name,param in model.named_parameters()}
-        new_inner_dict = model.state_dict()
+        inner_dict_grads = {name:param.grad for name,param in ModelStrategy.named_parameters()}
+        new_inner_dict = ModelStrategy.state_dict()
     return new_inner_dict,inner_dict_grads ,loss
 
 def train_batch(self,batch_data,params,device):
@@ -1797,7 +1867,7 @@ def train_meta_epoch_v4(self,epoch,first_order=False):
     # 第一步依据完整数据拆分出batch list
     self.dataloader.reset_batch_pointer(set='train', valid=False)
     loss_epoch = 0
-    for batch_task_id,batch_task_data in enumerate(self.dataloader.train_batch_task):
+    for batch_task_id,batch_task_data in enumerate(self.dataloader.train_batch_MLDG_task):
         # todo 明晰参数复制的过程，以及初步更新和二次更新的不同点，
         #  相应的support loss计算 query loss计算以及二次更新的结果 以及对应的后续将其函数化
         # 针对batch-task-data中的4个task进行处理 list
@@ -1843,8 +1913,8 @@ def train_meta_epoch_v4(self,epoch,first_order=False):
         if batch_task_id % self.args.show_step == 0 and self.args.ifshow_detail:
             print(
                 'train-{}/{} (epoch {}), train_loss = {:.5f}, time/batch = {:.5f} '.format(
-                    batch_task_id, len(self.dataloader.train_batch_task), epoch,task_query_loss.item(),end - start))
-    train_loss_epoch = loss_epoch/len(self.dataloader.train_batch_task)
+                    batch_task_id, len(self.dataloader.train_batch_MLDG_task), epoch,task_query_loss.item(),end - start))
+    train_loss_epoch = loss_epoch/len(self.dataloader.train_batch_MLDG_task)
     return train_loss_epoch
     
 def train_meta_epoch_v3(self,epoch,first_order=False):
@@ -1852,7 +1922,7 @@ def train_meta_epoch_v3(self,epoch,first_order=False):
     #         内外循环
     self.dataloader.reset_batch_pointer(set='train', valid=False)
     loss_epoch = 0
-    for batch_task_id,batch_task_data in enumerate(self.dataloader.train_batch_task):
+    for batch_task_id,batch_task_data in enumerate(self.dataloader.train_batch_MLDG_task):
         # todo 明晰参数复制的过程，以及初步更新和二次更新的不同点，
         #  相应的support loss计算 query loss计算以及二次更新的结果 以及对应的后续将其函数化
         # 针对batch-task-data中的4个task进行处理 list
@@ -1889,12 +1959,12 @@ def train_meta_epoch_v3(self,epoch,first_order=False):
         if batch_task_id % self.args.show_step == 0 and self.args.ifshow_detail:
             print(
                 'train-{}/{} (epoch {}), train_loss = {:.5f}, time/batch = {:.5f} '.format(
-                    batch_task_id, len(self.dataloader.train_batch_task), epoch,task_query_loss.item(),end - start))
-    train_loss_epoch = loss_epoch/len(self.dataloader.train_batch_task)
+                    batch_task_id, len(self.dataloader.train_batch_MLDG_task), epoch,task_query_loss.item(),end - start))
+    train_loss_epoch = loss_epoch/len(self.dataloader.train_batch_MLDG_task)
     return train_loss_epoch
     
-def meta_forward_v1(self,model,data,stage,create_graph=False,optim=None):
-    model.train()
+def meta_forward_v1(self,ModelStrategy,data,stage,create_graph=False,optim=None):
+    ModelStrategy.train()
     if optim is not None:
         optim.zero_grad()
     data_set = self.dataloader.rotate_shift_batch(data[0])
@@ -1907,7 +1977,7 @@ def meta_forward_v1(self,model,data,stage,create_graph=False,optim=None):
     # todo forward需要与对应的参数结合起来  内外参数
     print('begin '+stage)
     # todo iftest ?
-    outputs = model.forward(set_forward, iftest=False)
+    outputs = ModelStrategy.forward(set_forward, iftest=False)
     lossmask, num = getLossMask(outputs, seq_list[0], seq_list[1:],using_cuda=self.args.using_cuda)
     loss_o = torch.sum(self.criterion(outputs, batch_norm[1:, :, :2]), dim=2)
     loss = loss + torch.sum(loss_o * lossmask / num)
@@ -1919,7 +1989,7 @@ def meta_forward_v1(self,model,data,stage,create_graph=False,optim=None):
 def train_meta_epoch_v2(self,epoch):
     self.dataloader.reset_batch_pointer(set='train', valid=False)
     loss_epoch =[]
-    for batch_task_id, batch_task_data in enumerate(self.dataloader.train_batch_task):
+    for batch_task_id, batch_task_data in enumerate(self.dataloader.train_batch_MLDG_task):
         print('begin' + str(batch_task_id))
         start = time.time()
         self.net.zero_grad()
@@ -2000,7 +2070,7 @@ def train_meta_epoch_v2(self,epoch):
         if batch_task_id % self.args.show_step == 0 and self.args.ifshow_detail:
             print(
             'train-{}/{} (epoch {}), train_loss = {:.5f}, time/batch = {:.5f} '.format(
-                batch_task_id, len(self.dataloader.train_batch_task), epoch, task_query_loss.item(), end - start))
+                batch_task_id, len(self.dataloader.train_batch_MLDG_task), epoch, task_query_loss.item(), end - start))
     train_loss_epoch = torch.mean(torch.stack(loss_epoch))
     return train_loss_epoch
 
@@ -2040,7 +2110,7 @@ def test_meta_once(self):
     self.dataloader.reset_batch_pointer(set='test')
     print('begin test fine-tuning')
     loss_epoch = 0
-    for batch in tqdm(range(self.dataloader.testbatchnums)):
+    for batch in tqdm(range(self.dataloader.test_batchnums)):
         # 与train相同的batch处理步骤
         inputs, batch_id = self.dataloader.get_test_batch(batch)
         inputs = tuple([torch.Tensor(i) for i in inputs])

@@ -67,8 +67,8 @@ class NBA_Dataloader():
                 self.testskip = [skip[x] for x in self.test_set]
             elif args.test_set == 'nba':
                 #  相对应的为nba的原始划分数据 需要将其处理成一样的格式 即后期需要将原本的训练集按4份随机划分即可
-                self.train_dir = './data/NBA/nba/train.npy'
-                self.test_dir = './data/NBA/nba/test.npy'
+                self.train_dir = '../data/NBA/nba/train.npy'
+                self.test_dir = '../data/NBA/nba/test.npy'
                 self.trainskip = [10,10,10,10]
                 self.testskip = [10]
         else:
@@ -378,6 +378,7 @@ class NBA_Dataloader():
         trainbatch = self.get_seq_from_index_balance(traject_dict, data_index, setname)
         trainbatchnums = len(trainbatch)
         print('NBA batch_nums:'+str(trainbatchnums))
+
         if trainbatchnums < 50:
             f = open(cachefile, "wb")
             pickle.dump((trainbatch, trainbatchnums), f, protocol=2)
@@ -579,7 +580,7 @@ class NBA_Dataloader():
         '''
         Massed up data fragements in different time window together to a batch
         '''
-        if self.args.dataset == "eth5":
+        if self.args.dataset == "ETH_UCY":
             relation_num = 1
         elif self.args.dataset == "SDD" or self.args.dataset == "NBA" or self.args.dataset == "soccer":
             relation_num = 3

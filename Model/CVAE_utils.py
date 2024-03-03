@@ -44,7 +44,7 @@ class Normal:
         return self.mu
 
 class MLP2(nn.Module):
-    # 为CVAE准备的
+    # 为CVAE准备的 多层MLP
     def __init__(self, input_dim, hidden_dims=(128, 128), activation='tanh'):
         super().__init__()
         if activation == 'tanh':

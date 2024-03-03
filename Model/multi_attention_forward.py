@@ -52,7 +52,7 @@ def multi_head_attention_forward(query,                           # type: Tensor
     Args:
         query, key, value: map a query and a set of key-value pairs to an output.
             See "Attention Is All You Need" for more details.
-        embed_dim_to_check: total dimension of the model.
+        embed_dim_to_check: total dimension of the ModelStrategy.
         num_heads: parallel attention heads.
         in_proj_weight, in_proj_bias: input projection weight and bias.
         bias_k, bias_v: bias of the key and value sequences to be added at dim=0.

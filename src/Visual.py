@@ -311,7 +311,6 @@ def VISUAL_TSNE(data_dict,args):
                  'try2':['lightskyblue','mediumspringgreen','salmon','orange'],
                  'try3':['#feb64d','tomato','springgreen','deepskyblue','gold'],
                  'good':['#32d3eb','#5bc49f','#feb64d' ,'#ff7c7c','#9287e7','#60acfc']
-
                  }
     # colors = ['red', 'yellow', 'green','blue', 'black']
     colors = colors_sum['try']

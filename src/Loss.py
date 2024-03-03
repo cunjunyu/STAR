@@ -9,7 +9,9 @@ import os
 import cv2
 from copy import deepcopy
 from torch import nn
+
 torch.manual_seed(0)
+
 
 def getLossMask(outputs, node_first, seq_list, using_cuda=False):
     '''
@@ -66,9 +68,50 @@ def L2forTest(outputs, targets, obs_length, lossMask):
     return error.item(), error_cnt, final_error.item(), final_error_cnt, error_full
 
 
-def L2forTestS(outputs, targets, obs_length, lossMask, num_samples=20):
+def L2forTestS(outputs, targets, obs_length, lossMask, num_samples):
     '''
     Evaluation, stochastic version
+    outputs: [20,19,257,2]
+    targets:[19,257,2]
+    lossmask: [19,257]
+    '''
+    seq_length = outputs.shape[1]
+    #  L2 范数  error (num_samples, seq_length, num_Peds)
+    error = torch.norm(outputs - targets, p=2, dim=3)
+    # 只提取在整个时间窗口都有数据的行人only calculate the pedestrian presents fully presented in the time window
+    pedi_full = torch.sum(lossMask, dim=0) == seq_length
+    # 只计算观测序列后面的预测误差总和  (num_samples, pred_length, pedi_full)
+    error_full = error[:, obs_length - 1:, pedi_full]
+    # 选择预测误差最小的一组 并保存 ; ，每个行人在其20次采样中挑选最好的
+    error_full_sum = torch.sum(error_full, dim=1)
+    # error_full_sum (20,pde-full) error_full_sum_min (pde-full)
+    error_full_sum_min, min_index = torch.min(error_full_sum, dim=0)
+
+    best_error = []
+    # 添加每个行人最好采样下的pred-seq的error数据 （pred-seq，pedi-full）
+    for index, value in enumerate(min_index):
+        best_error.append(error_full[value, :, index])
+    best_error = torch.stack(best_error)
+    best_error = best_error.permute(1, 0)
+    # error为总的误差 所有行人不同采样中的最佳值累加
+    error = torch.sum(error_full_sum_min)
+    # error_cnt:相应的为损失计算中的总行人数 (obs_length * num_samples * num_Peds) / num_samples = obs_length  * num_Peds
+    error_cnt = error_full.numel() / num_samples
+    # 只取终点位置 其为FDE值
+    final_error = torch.sum(best_error[-1])
+    final_error_cnt = error_full.shape[-1]
+    # error: ADE
+    # final_error:FDE
+    return error.item(), error_cnt, final_error.item(), final_error_cnt
+
+def L2forTest_RMSE_MAE(outputs, targets, obs_length, lossMask, num_samples):
+    '''
+    Evaluation, stochastic version
+    outputs: [20,19,257,2]
+    targets:[19,257,2]
+    lossmask: [19,257]
+    RMSE:
+    MAE:
     '''
     seq_length = outputs.shape[1]
     #  L2 范数  error (num_samples, seq_length, num_Peds)
@@ -92,13 +135,92 @@ def L2forTestS(outputs, targets, obs_length, lossMask, num_samples=20):
     error = torch.sum(error_full_sum_min)
     # error_cnt:相应的为损失计算中的总行人数 (obs_length * num_samples * num_Peds) / num_samples = obs_length  * num_Peds
     error_cnt = error_full.numel() / num_samples
+    # error_rmse 为原mse 开根号；
+    error_rmse = torch.sqrt(error)
+
+    # ========MAE
+    error_mae = torch.norm(outputs - targets, p=1, dim=3)
+    error_mae_full = error_mae[:, obs_length - 1:, pedi_full]
+    error_mae_full_sum = torch.sum(error_mae_full, dim=1)
+    error_mae_full_sum_min, min_index_mae = torch.min(error_mae_full_sum, dim=0)
+    best_error_mae = []
+    # 添加每个行人最好采样下的pred-seq的error数据 （pred-seq，pedi-full）
+    for index, value in enumerate(min_index_mae):
+        best_error_mae.append(error_mae_full[value, :, index])
+    best_error_mae = torch.stack(best_error_mae)
+    best_error_mae = best_error_mae.permute(1, 0)
+    # error为总的误差 所有行人不同采样中的最佳值累加
+    error_mae = torch.sum(error_mae_full_sum_min)
+
+    return error_rmse.item(), error_cnt, error_mae.item(), error_cnt
+
+def L2forTestS_NEWSTAR(prediction, target_pred_traj, num_samples):
+    #  L2 范数  error (num_samples, pred_length, num_Peds) inputs (261人 6-43)epoch 0 batch 0 (20 2 138 2)
+    error_full = torch.norm(prediction - target_pred_traj, p=2, dim=3)
+    # 选择预测误差最小的一组 并保存 ; ，每个行人在其20次采样中挑选最好的
+    error_full_sum = torch.sum(error_full, dim=1)
+    # error_full_sum (20,pde-full) error_full_sum (1,pde-full)
+    error_full_sum_min, min_index = torch.min(error_full_sum, dim=0)
+    best_error = []
+    # 添加每个行人最好采样下的pred-seq的error数据 （pred-seq，pedi-full）
+    for index, value in enumerate(min_index):
+        best_error.append(error_full[value, :, index])
+    best_error = torch.stack(best_error)
+    best_error = best_error.permute(1, 0)
+    # error为总的误差 所有行人不同采样中的最佳值累加
+    error = torch.sum(error_full_sum_min)
+    # error_cnt:相应的为损失计算中的总行人数 (obs_length * num_samples * num_Peds) / num_samples = obs_length  * num_Peds
+    error_cnt = error_full.numel() / num_samples
     # 只取终点位置 其为FDE值
     final_error = torch.sum(best_error[-1])
     final_error_cnt = error_full.shape[-1]
-    # error: ADE
-    # final_error:FDE
-    return error.item(), error_cnt, final_error.item(), final_error_cnt
+    return error.item(),error_cnt,final_error.item(),final_error_cnt
 
+def L2forTest_RMSE_MAE_NEWSTAR(outputs, targets,  num_samples):
+    '''
+    Evaluation, stochastic version
+    outputs: prediction
+    targets: target_pred_traj
+    outputs: [20,12,257,2]
+    targets:[12,257,2]
+    RMSE:
+    MAE:
+    '''
+    seq_length = outputs.shape[1]
+    #  L2 范数  error (num_samples, pred_length, num_Peds)
+    error_full = torch.norm(outputs - targets, p=2, dim=3)
+    # 选择预测误差最小的一组 并保存 ; ，每个行人在其20次采样中挑选最好的
+    error_full_sum = torch.sum(error_full, dim=1)
+    # error_full_sum (20,pde-full) error_full_sum (1,pde-full)
+    error_full_sum_min, min_index = torch.min(error_full_sum, dim=0)
+
+    best_error = []
+    # 添加每个行人最好采样下的pred-seq的error数据 （pred-seq，pedi-full）
+    for index, value in enumerate(min_index):
+        best_error.append(error_full[value, :, index])
+    best_error = torch.stack(best_error)
+    best_error = best_error.permute(1, 0)
+    # error为总的误差 所有行人不同采样中的最佳值累加
+    error = torch.sum(error_full_sum_min)
+    # error_cnt:相应的为损失计算中的总行人数 (obs_length * num_samples * num_Peds) / num_samples = obs_length  * num_Peds
+    error_cnt = error_full.numel() / num_samples
+    # error_rmse 为原mse 开根号；
+    error_rmse = torch.sqrt(error)
+
+    # ========MAE
+    error_mae_full = torch.norm(outputs - targets, p=1, dim=3)
+    error_mae_full_sum = torch.sum(error_mae_full, dim=1)
+    error_mae_full_sum_min, min_index_mae = torch.min(error_mae_full_sum, dim=0)
+    best_error_mae = []
+    # 添加每个行人最好采样下的pred-seq的error数据 （pred-seq，pedi-full）
+    for index, value in enumerate(min_index_mae):
+        best_error_mae.append(error_mae_full[value, :, index])
+    best_error_mae = torch.stack(best_error_mae)
+    best_error_mae = best_error_mae.permute(1, 0)
+    # error为总的误差 所有行人不同采样中的最佳值累加
+    error_mae = torch.sum(error_mae_full_sum_min)
+
+    return error_rmse.item(), error_cnt, error_mae.item(), error_cnt
 
 def timeit(method):
     def timed(*args, **kw):
@@ -110,3 +232,23 @@ def timeit(method):
         return result
 
     return timed
+
+
+class RMSELoss(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x, y):
+        criterion = nn.MSELoss()
+        loss = torch.sqrt(criterion(x, y))
+        return loss
+
+
+class MAE(torch.nn.Module):
+    def __init__(self):
+        super().__init__()
+
+    def forward(self, x, y):
+        criterion = nn.L1Loss()
+        loss = criterion(x, y)
+        return loss

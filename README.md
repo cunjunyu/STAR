@@ -73,11 +73,11 @@ The code base heavily borrows from [SR-LSTM](https://github.com/zhangpur/SR-LSTM
 ```
 train-origin eth-ucy数据集 测试场景为hotel，训练阶段，新模型，训练范式原始，batch512
 ```
-python trainval.py --dataset eth5 --test_set hotel --start_test 5 --device 1  --phase train --stage origin --train_model new_star --batch_around_ped 512 
+python trainval.py --dataset ETH_UCY --test_set hotel --start_test 5 --device 1  --phase train --stage origin --train_model new_star --batch_around_ped 512 
 ```
 train-meta eth-ucy数据集 测试场景为hotel，训练阶段，新模型，训练范式MLDG，batch512,batchmeta512,mldg版本串行版 [效果最好版]
 ```
-python trainval.py --dataset eth5 --test_set hotel --start_test 5 --device 1  --phase train --stage meta --meta_way sequential1 --train_model new_star --batch_around_ped 512 --batch_around_ped_meta 512
+python trainval.py --dataset ETH_UCY --test_set hotel --start_test 5 --device 1  --phase train --stage meta --meta_way sequential1 --train_model new_star --batch_around_ped 512 --batch_around_ped_meta 512
 ```
 train-meta SDD数据集 测试场景为sdd，训练阶段，新模型，训练范式MLDG，batch512,batchmeta512,mldg版本串行版,过滤行人
 ```angular2html

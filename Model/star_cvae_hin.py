@@ -1,14 +1,10 @@
-import copy
-
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from .multi_attention_forward import multi_head_attention_forward
-from .CVAE_utils import Normal, MLP2, MLP
+from Model.CVAE_utils import Normal, MLP2
 from torch.distributions.normal import Normal as Normal_official
-from .star import TransformerModel, TransformerEncoder, TransformerEncoderLayer, MultiheadAttention
-from .star_cvae import Decoder, DecomposeBlock, STAR_CVAE
+from Model.star import TransformerModel, TransformerEncoder, TransformerEncoderLayer
+from Model.star_cvae import Decoder, STAR_CVAE
 
 torch.manual_seed(0)
 
@@ -28,11 +24,22 @@ class PositionalAgentEncoding(nn.Module):
         self.register_buffer('pe', pe)
 
     def build_pos_enc(self, max_len):
+        # 矩阵将被用来存储每个位置的编码。
         pe = torch.zeros(max_len, self.d_model)
+        # 生成一个从0到max_len - 1的一维张量，代表序列中每个位置的索引，然后通过 unsqueeze(1) 将其变为二维张量（列向量）。这使得每一行对应一个位置索引。
         position = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        """
+        计算了位置编码的分母项。
+        首先，使用 torch.arange(0, self.d_model, 2) 生成一个从0开始，步长为2的序列，这样就只考虑了偶数索引（因为我们将使用正弦和余弦交替）。
+        然后，这个序列通过乘以 (-np.log(10000.0) / self.d_model) 并应用指数函数 exp 来变换，得到分母项。
+        """
+        # 先log下来 在exp上去 同时因为分母是2i
+        # PE（pos,2i）   = sin(pos/(10000)^(2i/d_model))
+        # PE (pos,2i+1) = cos(pos/(10000)^(2i/d_model))
         div_term = torch.exp(torch.arange(0, self.d_model, 2).float() * (-np.log(10000.0) / self.d_model))
-        pe[:, 0::2] = torch.sin(position * div_term)
-        pe[:, 1::2] = torch.cos(position * div_term)
+        # 分别使用正弦和余弦函数来填充位置编码矩阵 pe。对于矩阵中的每一行（代表不同的位置索引），在偶数索引位置使用正弦函数，奇数索引位置使用余弦函数
+        pe[:, 0::2] = torch.sin(position * div_term) # 从索引 0 开始，每隔2个元素选取一个元素
+        pe[:, 1::2] = torch.cos(position * div_term) # 从索引 1 开始，每隔2个元素选取一个元素
         return pe
 
     def get_pos_enc(self, num_t, num_a, t_offset):
@@ -46,11 +53,15 @@ class PositionalAgentEncoding(nn.Module):
         return ae
 
     def forward(self, x, num_a, t_offset=0):
+        # 输入维度 [len, num_ped, 32]
         num_t = x.shape[0]
         pos_enc = self.get_pos_enc(num_t, num_a, t_offset)  # (T,N,D)
+        # 此处拼接x和位置编码
+        # 如果 concat 为真，则将输入特征和位置编码拼接，并通过全连接层。否则，直接将位置编码加到输入特征上。
         if self.concat:
             feat = [x, pos_enc]
             x = torch.cat(feat, dim=-1)
+            # 拼接完成后 继续经过 MLP
             x = self.fc(x)
         else:
             x += pos_enc
@@ -86,7 +97,7 @@ class STEncoder_HIN(nn.Module):
         self.dropout_prob = dropout_prob
         self.args = args
         emsize = 32  # embedding dimension
-        nhid = 2048  # the dimension of the feedforward network model in TransformerEncoder
+        nhid = 2048  # the dimension of the feedforward network ModelStrategy in TransformerEncoder
         nlayers = 2  # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
         nhead = 8  # the number of heads in the multihead-attention models
         dropout = 0.1  # the dropout value
@@ -124,7 +135,7 @@ class STEncoder_HIN(nn.Module):
         num_ped = nodes_current.shape[1]
         # todo 新的不同结构 空间时间 时间空间双层结构
         # 时间-空间分支
-        # 时间编码 2- 32 drop transformer
+        # 时间编码 2- 32 drop transformer [len,num_ped,32]
         # temporal_input_embedded = self.dropout_in_1(self.relu(self.input_embedding_layer_temporal(nodes_current)))
         nodes_current_embedded = self.input_embedding_layer_temporal(nodes_current)
         nodes_current_pos = self.pos_encoder1(nodes_current_embedded, num_a=num_ped)

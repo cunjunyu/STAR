@@ -3,11 +3,10 @@ import copy
 import numpy as np
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
-from .multi_attention_forward import multi_head_attention_forward
-from .CVAE_utils import Normal,MLP2,MLP
+from Model.CVAE_utils import Normal,MLP2,MLP
 from torch.distributions.normal import Normal as Normal_official
-from .star import TransformerModel,TransformerEncoder,TransformerEncoderLayer,MultiheadAttention
+from Model.star import TransformerModel,TransformerEncoder,TransformerEncoderLayer
+
 torch.manual_seed(0)
 
 
@@ -128,7 +127,7 @@ class Decoder(torch.nn.Module):
         # todo need to test
         if mode == 'inference':
             out_seq = out_seq.view(-1, sample_num, *out_seq.shape[1:])
-            # (agent_num, sample_num, self.past_length, 2)
+            # (agent_num, sample_num, self.pred_length, 2)
         return out_seq, recover_pre_seq
 
 
@@ -143,7 +142,7 @@ class STEncoder(torch.nn.Module):
         self.dropout_prob = dropout_prob
         self.args = args
         emsize = 32  # embedding dimension
-        nhid = 2048  # the dimension of the feedforward network model in TransformerEncoder
+        nhid = 2048  # the dimension of the feedforward network ModelStrategy in TransformerEncoder
         nlayers = 2  # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
         nhead = 8  # the number of heads in the multihead-attention models
         dropout = 0.1  # the dropout value
@@ -271,7 +270,7 @@ class STAR_CVAE(torch.nn.Module):
 
     def mean_normalize_abs_input(self, node_abs, st_ed):
         """
-
+        目标：是为了进行空间位置的归一化 即将属于同一个场景下的不同agent的轨迹数据归一化到同一个原点 这个原点的计算由不同agent轨迹数据的全部值共同决定
         :param node_abs: Absolute coordinates of pedestrians
         :type Tensor
         :param st_ed: list of tuple indicates the indices of pedestrians belonging to the same scene
@@ -343,7 +342,7 @@ class STAR_CVAE(torch.nn.Module):
         pred_length = self.args.pred_length
         # nodes_abs未归一化 /nodes_norm(归一化后)(19,259,2)  shift_value(19 259 2) seq_list (19,259) nei_lists(19 259 259) nei_num(19,259) batch_pednum(50)
         nodes_abs, nodes_norm, shift_value, seq_list, nei_lists, nei_num, batch_pednum = inputs
-        # 注意 此处针对的是不同帧下行人数量不一的问题，传统的解决思路是直接提取从头到尾到存在的行人，而star方法则是逐帧中提取从头到尾到存在的行人，
+        # 注意 此处针对的是不同帧下行人数量不一的问题，传统的解决思路是直接提取从头到尾到存在的行人，而star方法则是逐帧中提取从头到尾到存在的行人，【应该是将空的行人进行补零了】
         # 最后的loss计算时也是只考虑从头到尾的行人，这个只是相当于利用了更多行人的信息；但在此处，我们采用传统思路预处理，因为我们是针对完全形态分析
         # node-idx筛选出从起始到当前帧都存在的ped
         node_index = self.get_node_index(seq_list)
@@ -352,7 +351,7 @@ class STAR_CVAE(torch.nn.Module):
         # 更新batch-pednum：去除消失的行人后batch中每个windows下的新的人数；
         updated_batch_pednum = self.update_batch_pednum(batch_pednum, node_index)
         # 依据updated-batch-pednum得出相应的每个windows中开始和结束的行人序列号，便于分开处理
-        # todo 在batch41出现batch_pednum = 0 的情况 ！
+        # todo 在batch41出现batch_pednum = 0 的情况 ！ 应该利用断言去写！
         if batch_pednum.cpu().detach().numpy().shape[0] - updated_batch_pednum.cpu().detach().numpy().shape[0] > 0:
             print(
                 'batch_pednum:' + str(batch_pednum.cpu().detach().numpy().shape) + '/' + 'updated_batch_pednum:' + str(
@@ -419,6 +418,7 @@ class STAR_CVAE(torch.nn.Module):
 
         ### use q ###
         # z = qz_sampled 基于解码器，输入过去轨迹past_traj()和特征past_feature()，采样的z，agent_num
+        # todo 即node-past此处没有经历过依场景空间归一化，而past-traj输入有归一化后的数据 故而需要分析此处的node-past选取的合理性？？
         node_past = nodes_current[:obs_length].transpose(0, 1)  # (num-ped,8,2)
         node_future = nodes_current[obs_length:].transpose(0, 1)  # (num-ped,12,2)
         # pred:(num-ped,pred,2)  recover (num_ped,obs,2)
@@ -547,7 +547,7 @@ class STAR_CVAE(torch.nn.Module):
         past_feature = self.past_encoder(past_traj)
         target_pred_traj = nodes_current[obs_length:]
         # 上述代码计算潜在空间中的特征向量past_feature，相同于forward，只是在测试推理过程中不需要未来数据
-        sample_num = 20
+        sample_num = self.args.sample_num
         """
         if self.args.learn_prior:
             past_feature_repeat = past_feature.repeat_interleave(sample_num, dim=0)
@@ -565,7 +565,7 @@ class STAR_CVAE(torch.nn.Module):
             else:
                 ValueError('Unknown hidden distribution!')
         """
-        # todo pz-layer
+        # todo pz-layer有问题 这里的inference与train阶段的pz-layer完全没有联系 则完全未学习 是一个随机的噪声？？
         past_feature_repeat = past_feature.repeat_interleave(sample_num, dim=0)
         if self.args.ztype == 'gaussian':
             pz_distribution = Normal(
@@ -600,7 +600,7 @@ class NEW_STAR(torch.nn.Module):
         self.var = []
 
         emsize = 32  # embedding dimension
-        nhid = 2048  # the dimension of the feedforward network model in TransformerEncoder
+        nhid = 2048  # the dimension of the feedforward network ModelStrategy in TransformerEncoder
         nlayers = 2  # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
         nhead = 8  # the number of heads in the multihead-attention models
         dropout = 0.1  # the dropout value

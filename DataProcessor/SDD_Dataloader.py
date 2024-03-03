@@ -223,7 +223,7 @@ def sliding_window(df, window_size, stride):
     df = df.reset_index(drop=True)
     return df
 
-
+# ---------frame_ped_dict 和 frame_ped_dict_hin是可以合并的 多做处理 并无关系
 def frame_ped_dict(data,data_file):
     # frame,label,x,y,sceneID,metaID => [frame,metaID,y,x,label,sceneID]
     SDD_origin_data = data.to_numpy().T
@@ -540,7 +540,7 @@ def SDD_preprocess_multi_scene(train_data_file=None, test_data_file=None):
     # train
     print('加载训练数据')
     # train_data = load_SDD(path='../data/SDD', mode='train')
-    train_data = load_SDD(path='./data/SDD', mode='train')
+    train_data = load_SDD(path='../data/SDD', mode='train')
     # 切分断开的轨迹 降采样 metaID的作用 行 4189055 metaID 6730  1153个trackID
     print('切分断开的轨迹')
     train_data = split_fragmented(train_data)
@@ -555,7 +555,7 @@ def SDD_preprocess_multi_scene(train_data_file=None, test_data_file=None):
     # test
     print('加载测试数据')
     # test_data = load_SDD(path='../data/SDD', mode='test')
-    test_data = load_SDD(path='./data/SDD', mode='test')
+    test_data = load_SDD(path='../data/SDD', mode='test')
     print('切分断开的轨迹')
     # 切分断开的轨迹 降采样 metaID的作用 行 4189055 metaID 6730  1153个trackID
     test_data = split_fragmented(test_data)
@@ -574,9 +574,11 @@ def SDD_preprocess_multi_scene(train_data_file=None, test_data_file=None):
 def traject_preprocess_SDD(test_set, SDD_if_filter='False',HIN = 'False', train_data_file=None, test_data_file=None):
     print(os.getcwd())
     # 第一步 ：处理最原始的数据
-    DATA_PATH = './data/SDD/sdd_full_data.pkl'
-    TRAIN_DATA_PATH = './data/SDD/sdd_train_data_mutli_scene.pkl'
-    TEST_DATA_PATH = './data/SDD/sdd_test_data_mutli_scene.pkl'
+    # 运用的是SDD完整的全部数据 由自己从最原始的txt生成
+    DATA_PATH = '../data/SDD/sdd_full_data.pkl'
+    # 运用的是PECNET带的数据
+    TRAIN_DATA_PATH = '../data/SDD/sdd_train_data_mutli_scene.pkl'  #
+    TEST_DATA_PATH = '../data/SDD/sdd_test_data_mutli_scene.pkl'
     if not os.path.exists(DATA_PATH):
         print('preocess data from raw SDD')
         sdd_data = SDD_preprocess_full()
@@ -586,7 +588,7 @@ def traject_preprocess_SDD(test_set, SDD_if_filter='False',HIN = 'False', train_
         f.close()
         print('Done')
     if not (os.path.exists(TRAIN_DATA_PATH) and os.path.exists(TEST_DATA_PATH)):
-        print('preocess data from raw SDD multi scene')
+        print('process data from raw SDD multi scene')
         sdd_train_data, sdd_test_data = SDD_preprocess_multi_scene()
         print('process finish !!')
         f_train = open(TRAIN_DATA_PATH, "wb")
@@ -598,7 +600,7 @@ def traject_preprocess_SDD(test_set, SDD_if_filter='False',HIN = 'False', train_
         print('Done')
     # 第二步: 依据对应的条件划分不同的训练和测试集
     if test_set in ['bookstore', 'coupa', 'deathCircle', 'gates', 'hyang', 'nexus', 'little', 'quad']:
-        DATA_PATH = './data/SDD/sdd_full_data.pkl'
+        DATA_PATH = '../data/SDD/sdd_full_data.pkl'
         sdd_data = pd.read_pickle(DATA_PATH)
         sdd_test_data = sdd_data[sdd_data['scene'] == test_set]
         sdd_train_data = sdd_data[sdd_data['scene'] != test_set]
@@ -606,8 +608,8 @@ def traject_preprocess_SDD(test_set, SDD_if_filter='False',HIN = 'False', train_
         sdd_train_data = sdd_train_data.drop(columns=['scene', 'trackId'])
         # frame,label,x,y,sceneID,metaID
     elif test_set == 'sdd':
-        TRAIN_DATA_PATH = './data/SDD/sdd_train_data_mutli_scene.pkl'
-        TEST_DATA_PATH = './data/SDD/sdd_test_data_mutli_scene.pkl'
+        TRAIN_DATA_PATH = '../data/SDD/sdd_train_data_mutli_scene.pkl'
+        TEST_DATA_PATH = '../data/SDD/sdd_test_data_mutli_scene.pkl'
         sdd_train_data = pd.read_pickle(TRAIN_DATA_PATH)
         sdd_test_data = pd.read_pickle(TEST_DATA_PATH)
         sdd_test_data = sdd_test_data.drop(columns=['trackId'])
@@ -675,8 +677,8 @@ class SDD_Dataloader():
         if not (os.path.exists(self.test_batch_cache) or os.path.exists(self.test_batch_cache_split)):
             self.test_frameped_dict, self.test_pedtraject_dict,self.test_scene_list,self.test_pedlabel_dict = self.load_dict(self.test_data_file)
             self.dataPreprocess_HIN('test')
-        self.testbatch, self.testbatchnums = self.load_split_data(self.test_batch_cache)
-        print('Total number of test batches:', self.testbatchnums)
+        self.test_batch, self.test_batchnums = self.load_split_data(self.test_batch_cache)
+        print('Total number of test batches:', self.test_batchnums)
 
         if self.args.stage == 'origin' and self.args.phase == 'train':
             print("Preparing origin data batches.")
@@ -684,16 +686,16 @@ class SDD_Dataloader():
                 self.train_frameped_dict, self.train_pedtraject_dict,self.train_scene_list,self.train_pedlabel_dict = self.load_dict(self.train_data_file)
                 self.dataPreprocess_HIN('train')
             # todo 如果存在相应的split——0——1文件，则需要对应的判断并计算出有多少个这样的文件 不然每次都要处理一次 ！！
-            self.trainbatch, self.trainbatchnums= self.load_split_data(self.train_batch_cache)
-            print('Total number of training origin batches:', self.trainbatchnums)
+            self.trainbatch, self.train_batchnums= self.load_split_data(self.train_batch_cache)
+            print('Total number of training origin batches:', self.train_batchnums)
 
         elif self.args.stage == 'meta'and self.args.phase == 'train':
             if not (os.path.exists(self.train_MLDG_batch_cache) or os.path.exists(self.train_MLDG_batch_cache_split)):
                 print("process train meta cpkl")
                 self.train_frameped_dict, self.train_pedtraject_dict, self.train_scene_list, self.train_pedlabel_dict = self.load_dict(self.train_data_file)
                 self.MLDG_TASK(setname='train')
-            self.train_batch_task,self.train_batch_tasknums = self.load_split_data(self.train_MLDG_batch_cache)
-            print('Total number of training MLDG task batches :', len(self.train_batch_task))
+            self.train_batch_MLDG_task,self.train_batch_MLDG_tasknums = self.load_split_data(self.train_MLDG_batch_cache)
+            print('Total number of training MLDG task batches :', len(self.train_batch_MLDG_task))
 
         elif ( self.args.stage == 'MVDG' or self.args.stage =='MVDGMLDG' ) and self.args.phase == 'train':
             if not (os.path.exists(self.train_MVDG_batch_cache) or os.path.exists(self.train_MVDG_batch_cache_split)):
@@ -721,7 +723,7 @@ class SDD_Dataloader():
             shuffle = True
         trainbatch_meta = []
         trainbatchnums_meta = []
-        # 第二步 按场景分解获取对应batch数据
+
         for seti, seti_frameped_dict in enumerate(frameped_dict):
             trainbatch_meta.append({})
             # 只需要在此处将data-index按相应的场景分开即可 此处data-index传入了对应的seti 故而出来的data-index会与结果有较好的对应
@@ -769,7 +771,6 @@ class SDD_Dataloader():
             f.close()
         else:
             self.pick_split_data(batch_task,cachefile,batch_size = 10)
-
 
     def MVDG_TASK(self,setname):
         # 第一步 加载对应数据集以及相应参数
@@ -853,7 +854,6 @@ class SDD_Dataloader():
             f.close()
         else:
             self.pick_split_data(new_batch_task_list,cachefile,batch_size= 5)
-
 
     def dataPreprocess_HIN(self,setname):
         """
@@ -1027,7 +1027,7 @@ class SDD_Dataloader():
         '''
         Massed up data fragements in different time window together to a batch
         '''
-        if self.args.dataset == "eth5":
+        if self.args.dataset == "ETH_UCY":
             relation_num = 1
         elif self.args.dataset == "SDD" or self.args.dataset == "NBA" or self.args.dataset == "NFL":
             relation_num = 3
@@ -1104,6 +1104,7 @@ class SDD_Dataloader():
                     nei_list[rel_id, select, pedi, pedj] = 0
         return seq_list, nei_list, nei_num
 
+    # ----------通用的结构-----------
     def get_data_index(self, data_dict, setname, ifshuffle=True):
         '''
         Get the dataset sampling index.
@@ -1170,8 +1171,6 @@ class SDD_Dataloader():
         if setname == 'train':
             data_index = np.append(data_index, data_index[:, :self.args.batch_size], 1)
         return data_index
-
-    # ----------通用的结构-----------
 
     def find_trajectory_fragment(self, trajectory, startframe, seq_length, skip):
         '''
@@ -1345,13 +1344,13 @@ class SDD_Dataloader():
         return batch_data
 
     def get_train_batch(self, idx):
-        batch_data, batch_id = self.trainbatch[idx]
+        batch_data, batch_id = self.train_batch[idx]
         batch_data = self.rotate_shift_batch(batch_data, ifrotate=self.args.randomRotate)
 
         return batch_data, batch_id
 
     def get_test_batch(self, idx):
-        batch_data, batch_id = self.testbatch[idx]
+        batch_data, batch_id = self.test_batch[idx]
         batch_data = self.rotate_shift_batch(batch_data, ifrotate=False)
         return batch_data, batch_id
 
@@ -1500,7 +1499,7 @@ def traject_preprocess_SDD(self, setname):
         '''
         Massed up data fragements in different time window together to a batch
         '''
-        if self.args.dataset == "eth5":
+        if self.args.dataset == "ETH_UCY":
             relation_num = 1
         elif self.args.dataset == "SDD" or self.args.dataset == "NBA" or self.args.dataset == "NFL":
             relation_num = 3

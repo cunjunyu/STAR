@@ -1,15 +1,7 @@
-from torch.utils.data import Dataset
-import torch
 import pickle
-import random
-import time
-import pandas as pd
 import os
-import cv2
-from copy import deepcopy
-from torch import nn
 import numpy as np
-from .NBA_Dataloader import NBA_Dataloader
+from DataProcessor.NBA_Dataloader import NBA_Dataloader
 
 
 class Soccer_Dataloader_HIN(NBA_Dataloader):
@@ -29,7 +21,7 @@ class Soccer_Dataloader_HIN(NBA_Dataloader):
         self.args.pred_length = 10
         self.train_dir = ['./data/NBA/nba/source/CLE', './data/NBA/nba/source/GSW', './data/NBA/nba/source/NYK',
                           './data/NBA/nba/source/OKC', './data/NBA/nba/source/SAS']
-        self.test_dir = './data/soccer/all_trajs.npy'
+        self.test_dir = '../data/soccer/all_trajs.npy'
         self.train_skip = [10, 10, 10, 10, 10]
         self.test_skip = [10]  # 0.04s一帧 故而降采样为0,4s
 
@@ -58,16 +50,16 @@ class Soccer_Dataloader_HIN(NBA_Dataloader):
         if not (os.path.exists(self.test_batch_cache) or os.path.exists(self.test_batch_cache_split)):
             self.test_traject_dict = self.load_dict(self.test_data_file)
             self.dataPreprocess('test')
-        self.testbatch, self.testbatchnums = self.load_split_data(self.test_batch_cache)
-        print('Total number of test batches:', self.testbatchnums)
+        self.test_batch, self.test_batchnums = self.load_split_data(self.test_batch_cache)
+        print('Total number of test batches:', self.test_batchnums)
 
         if self.args.stage == 'origin':
             print("Preparing origin data batches.")
             if not (os.path.exists(self.train_batch_cache) or os.path.exists(self.train_batch_cache_split)):
                 self.traject_dict = self.load_dict(self.train_data_file)
                 self.dataPreprocess('train')
-            self.trainbatch, self.trainbatchnums = self.load_split_data(self.train_batch_cache)
-            print('Total number of training origin batches:', self.trainbatchnums)
+            self.train_batch, self.train_batchnums = self.load_split_data(self.train_batch_cache)
+            print('Total number of training origin batches:', self.train_batchnums)
 
         elif self.args.stage == 'meta':
             if not (os.path.exists(self.train_MLDG_batch_cache) or os.path.exists(self.train_MLDG_batch_cache_split)):
@@ -89,7 +81,7 @@ class Soccer_Dataloader_HIN(NBA_Dataloader):
     """
     def load_dict(self, data_file):
     def load_cache(self, data_file):
-    def pick_split_data(self,trainbatch,cachefile,batch_size):
+    def pick_split_data(self,train_batch,cachefile,batch_size):
     def load_split_data(self,cachefile):
     def get_train_batch(self, idx):
     def get_test_batch(self, idx):
@@ -150,11 +142,12 @@ class Soccer_Dataloader_HIN(NBA_Dataloader):
             data_now = 'soccer'
         data_index = self.get_data_index(traject_dict, setname, ifshuffle=shuffle)
         # traject——dict不一样
-        trainbatch = self.get_seq_from_index_balance(traject_dict, data_index, setname)
-        trainbatchnums = len(trainbatch)
-        print(str(data_now) + 'batch_nums:' + str(trainbatchnums))
+        # 因为需要同时处理 NBA和Soccer 故而 get_seq_from_index_balance 以及相关的函数应该都是通用的
+        train_batch = self.get_seq_from_index_balance(traject_dict, data_index, setname)
+        train_batchnums = len(train_batch)
+        print(str(data_now) + 'batch_nums:' + str(train_batchnums))
         f = open(cachefile, "wb")
-        pickle.dump((trainbatch, trainbatchnums), f, protocol=2)
+        pickle.dump((train_batch, train_batchnums), f, protocol=2)
         f.close()
 
     def get_seq_from_index_balance(self, traject_dict, data_index, setname):
@@ -216,7 +209,7 @@ class Soccer_Dataloader_HIN(NBA_Dataloader):
         '''
         Massed up data fragements in different time window together to a batch
         '''
-        if self.args.dataset == "eth5":
+        if self.args.dataset == "ETH_UCY":
             relation_num = 1
         elif self.args.dataset == "SDD" or self.args.dataset == "NBA" or self.args.dataset == "soccer":
             relation_num = 3
@@ -332,7 +325,7 @@ class Soccer_Dataloader_NOHIN(Soccer_Dataloader_HIN):
         self.args.pred_length = 10
         self.train_dir = ['./data/NBA/nba/source/CLE', './data/NBA/nba/source/GSW', './data/NBA/nba/source/NYK',
                           './data/NBA/nba/source/OKC', './data/NBA/nba/source/SAS']
-        self.test_dir = './data/soccer/all_trajs.npy'
+        self.test_dir = '../data/soccer/all_trajs.npy'
         self.train_skip = [10, 10, 10, 10, 10]
         self.test_skip = [10]  # 0.04s一帧 故而降采样为0,4s
 
@@ -361,16 +354,16 @@ class Soccer_Dataloader_NOHIN(Soccer_Dataloader_HIN):
         if not (os.path.exists(self.test_batch_cache) or os.path.exists(self.test_batch_cache_split)):
             self.test_traject_dict = self.load_dict(self.test_data_file)
             self.dataPreprocess('test')
-        self.testbatch, self.testbatchnums = self.load_split_data(self.test_batch_cache)
-        print('Total number of test batches:', self.testbatchnums)
+        self.test_batch, self.test_batchnums = self.load_split_data(self.test_batch_cache)
+        print('Total number of test batches:', self.test_batchnums)
 
         if self.args.stage == 'origin':
             print("Preparing origin data batches.")
             if not (os.path.exists(self.train_batch_cache) or os.path.exists(self.train_batch_cache_split)):
                 self.traject_dict = self.load_dict(self.train_data_file)
                 self.dataPreprocess('train')
-            self.trainbatch, self.trainbatchnums = self.load_split_data(self.train_batch_cache)
-            print('Total number of training origin batches:', self.trainbatchnums)
+            self.train_batch, self.train_batchnums = self.load_split_data(self.train_batch_cache)
+            print('Total number of training origin batches:', self.train_batchnums)
 
         elif self.args.stage == 'meta':
             if not (os.path.exists(self.train_MLDG_batch_cache) or os.path.exists(self.train_MLDG_batch_cache_split)):
@@ -392,7 +385,7 @@ class Soccer_Dataloader_NOHIN(Soccer_Dataloader_HIN):
     # 通用的NBA-dataloader方法 此处不在赘述 只简单列举
     def load_dict(self, data_file):
     def load_cache(self, data_file):
-    def pick_split_data(self,trainbatch,cachefile,batch_size):
+    def pick_split_data(self,train_batch,cachefile,batch_size):
     def load_split_data(self,cachefile):
     def get_train_batch(self, idx):
     def get_test_batch(self, idx):

@@ -4,8 +4,8 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from .multi_attention_forward import multi_head_attention_forward
-from .CVAE_utils import Normal,MLP2,MLP
+from Model.multi_attention_forward import multi_head_attention_forward
+from Model.CVAE_utils import Normal,MLP2,MLP
 from torch.distributions.normal import Normal as Normal_official
 torch.manual_seed(0)
 def get_noise(shape, noise_type):
@@ -38,14 +38,14 @@ def _get_clones(module, N):
 
 
 class MultiheadAttention(nn.Module):
-    r"""Allows the model to jointly attend to information
+    r"""Allows the ModelStrategy to jointly attend to information
     from different representation subspaces.
     See reference: Attention Is All You Need
     .. math::
         \text{MultiHead}(Q, K, V) = \text{Concat}(head_1,\dots,head_h)W^O
         \text{where} head_i = \text{Attention}(QW_i^Q, KW_i^K, VW_i^V)
     Args:
-        embed_dim: total dimension of the model.
+        embed_dim: total dimension of the ModelStrategy.
         num_heads: parallel attention heads.
         dropout: a Dropout layer on attn_output_weights. Default: 0.0.
         bias: add bias as module parameter. Default: True.
@@ -73,6 +73,7 @@ class MultiheadAttention(nn.Module):
         self.num_heads = num_heads
         self.dropout = dropout
         self.head_dim = embed_dim // num_heads
+        # 在实践中，每个头的维度通常是原始嵌入维度除以头数。例如，如果模型的嵌入维度是512，使用8个头，那么每个头的维度将会是64
         assert self.head_dim * num_heads == self.embed_dim, "embed_dim must be divisible by num_heads"
 
         if self._qkv_same_embed_dim is False:
@@ -181,7 +182,7 @@ class TransformerEncoderLayer(nn.Module):
     def __init__(self, d_model, nhead, dim_feedforward=2048, dropout=0, activation="relu"):
         super(TransformerEncoderLayer, self).__init__()
         self.self_attn = MultiheadAttention(d_model, nhead, dropout=dropout)
-        # Implementation of Feedforward model
+        # Implementation of Feedforward ModelStrategy
         self.linear1 = nn.Linear(d_model, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
         self.linear2 = nn.Linear(dim_feedforward, d_model)
@@ -267,7 +268,7 @@ class TransformerEncoder(nn.Module):
         output = src
 
         atts = []
-
+        # Encoder有1层transformer layer
         for i in range(self.num_layers):
             output, attn = self.layers[i](output, src_mask=mask,
                                           src_key_padding_mask=src_key_padding_mask)
@@ -289,7 +290,11 @@ class TransformerModel(nn.Module):
         self.ninp = ninp
 
     def forward(self, src, mask):
+        # 它通过在原始掩码 mask 上添加一个单位矩阵（identity matrix）来创建。单位矩阵的对角线上的元素为1，其余为0
+        # 这个步骤实际上并不阻止序列中的每个位置关注到自身，反而可能会增强这种关注（因为对角线上的值变成了 1 或更大，取决于原始掩码的值）。
         n_mask = mask + torch.eye(mask.shape[0], mask.shape[0]).cuda()
+        # 将掩码中的 0 替换为一个非常小的数（接近负无穷）。这在自注意力的 softmax 步骤中有效地屏蔽了这些位置，因为经过 softmax 后这些位置的权重会接近零。
+        # 将掩码中的 1 替换为 0。这一步看起来有些多余，因为在 softmax 中，0 会被转换为一个有效的权重值。
         n_mask = n_mask.float().masked_fill(n_mask == 0., float(-1e20)).masked_fill(n_mask == 1., float(0.0))
         output = self.transformer_encoder(src, mask=n_mask)
 
@@ -310,7 +315,7 @@ class STAR(torch.nn.Module):
         self.var = []
 
         emsize = 32  # embedding dimension
-        nhid = 2048  # the dimension of the feedforward network model in TransformerEncoder
+        nhid = 2048  # the dimension of the feedforward network ModelStrategy in TransformerEncoder
         nlayers = 2  # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
         nhead = 8  # the number of heads in the multihead-attention models
         dropout = 0.1  # the dropout value
