@@ -46,6 +46,7 @@ def get_parser():
     parser.add_argument('--neighbor_thred', default=10, type=int)
     parser.add_argument('--learning_rate', default=0.0015, type=float)
     parser.add_argument('--clip', default=1, type=int)
+    parser.add_argument('--encoder_type', default='gcn', type=str)
 
     return parser
 

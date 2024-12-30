@@ -25,10 +25,15 @@ class processor(object):
         if not os.path.isdir(self.args.model_dir):
             os.mkdir(self.args.model_dir)
 
-        self.net_file = open(os.path.join(self.args.model_dir, 'net.txt'), 'a+')
+        self.net_file_name = "net_" + self.args.train_model + "_" + self.args.encoder_type + "_" + str(args.num_epochs) + ".txt"
+
+        self.log_file_name = "log_curve_" + self.args.train_model + "_" + self.args.encoder_type + "_" + str(args.num_epochs) + ".txt"
+
+
+        self.net_file = open(os.path.join(self.args.model_dir, self.net_file_name), 'a+')
         self.net_file.write(str(self.net))
         self.net_file.close()
-        self.log_file_curve = open(os.path.join(self.args.model_dir, 'log_curve.txt'), 'a+')
+        self.log_file_curve = open(os.path.join(self.args.model_dir, self.log_file_name), 'a+')
 
         self.best_ade = 100
         self.best_fde = 100
@@ -37,7 +42,7 @@ class processor(object):
     def save_model(self, epoch):
 
         model_path = self.args.save_dir + '/' + self.args.train_model + '/' + self.args.train_model + '_' + \
-                     str(epoch) + '.tar'
+                     str(epoch) + self.args.encoder_type + '.tar'
         torch.save({
             'epoch': epoch,
             'state_dict': self.net.state_dict(),
@@ -94,7 +99,7 @@ class processor(object):
 
             if epoch % 10 == 0:
                 self.log_file_curve.close()
-                self.log_file_curve = open(os.path.join(self.args.model_dir, 'log_curve.txt'), 'a+')
+                self.log_file_curve = open(os.path.join(self.args.model_dir, self.log_file_name), 'a+')
 
             if epoch >= self.args.start_test:
                 print(

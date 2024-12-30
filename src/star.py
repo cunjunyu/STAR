@@ -7,6 +7,12 @@ import torch.nn.functional as F
 
 from .multi_attention_forward import multi_head_attention_forward
 
+from .GCN import *
+
+from .GAT import *
+
+from .GTN import *
+
 
 def get_noise(shape, noise_type):
     if noise_type == "gaussian":
@@ -297,13 +303,33 @@ class STAR(torch.nn.Module):
         self.temporal_encoder_layer = TransformerEncoderLayer(d_model=32, nhead=8)
 
         emsize = 32  # embedding dimension
-        nhid = 2048  # the dimension of the feedforward network model in TransformerEncoder
+        nhid = 64  # the dimension of the feedforward network model in TransformerEncoder
         nlayers = 2  # the number of nn.TransformerEncoderLayer in nn.TransformerEncoder
         nhead = 8  # the number of heads in the multihead-attention models
         dropout = 0.1  # the dropout value
 
-        self.spatial_encoder_1 = TransformerModel(emsize, nhead, nhid, nlayers, dropout)
-        self.spatial_encoder_2 = TransformerModel(emsize, nhead, nhid, nlayers, dropout)
+        # ORG encoders
+        #self.spatial_encoder_1 = TransformerModel(emsize, nhead, nhid, nlayers, dropout)
+        #self.spatial_encoder_2 = TransformerModel(emsize, nhead, nhid, nlayers, dropout)
+
+        encoder_type = args.encoder_type
+        # Set encoder type
+        self.encoder_type = encoder_type.lower()
+        print("Encoder type:", self.encoder_type.upper())
+        if self.encoder_type == 'gcn':
+            self.spatial_encoder_1 = GCNEncoder(in_features=emsize, hidden_features=nhid, out_features=32, dropout=dropout_prob)
+            self.spatial_encoder_2 = GCNEncoder(in_features=emsize, hidden_features=nhid, out_features=32, dropout=dropout_prob)
+
+        elif self.encoder_type == 'gat':
+            self.spatial_encoder_1 = GATEncoder(in_features=emsize, hidden_features=nhid, out_features=32, dropout=dropout_prob)
+            self.spatial_encoder_2 = GATEncoder(in_features=emsize, hidden_features=nhid, out_features=32, dropout=dropout_prob)
+
+        elif self.encoder_type == 'gtn':
+            self.spatial_encoder_1 = GTNEncoder(in_features=emsize, hidden_features=nhid, out_features=32, dropout=dropout_prob)
+            self.spatial_encoder_2 = GTNEncoder(in_features=emsize, hidden_features=nhid, out_features=32, dropout=dropout_prob)
+
+        else:
+            raise ValueError("Invalid encoder type. Expected 'gcn', 'gat', or 'gtn'.")
 
         self.temporal_encoder_1 = TransformerEncoder(self.temporal_encoder_layer, 1)
         self.temporal_encoder_2 = TransformerEncoder(self.temporal_encoder_layer, 1)
@@ -410,6 +436,10 @@ class STAR(torch.nn.Module):
         GM = torch.zeros(nodes_norm.shape[0], num_Ped, 32).cuda()
 
         noise = get_noise((1, 16), 'gaussian')
+        
+        #print("nodes_abs.shape", nodes_abs.shape)
+        #print("nodes_norm.shape", nodes_norm.shape)
+        #print("seq length", self.args.seq_length)
 
         for framenum in range(self.args.seq_length - 1):
 
@@ -439,6 +469,14 @@ class STAR(torch.nn.Module):
                 # We normalize the absolute coordinates using the mean value in the same scene
                 node_abs = self.mean_normalize_abs_input(nodes_abs[:framenum + 1, node_index], st_ed)
 
+            # Prepare the adjacency matrix
+            adjacency_matrix = nei_list.float()
+            
+            # Normalize adjacency matrix for GCN if using GCNEncoder
+            if self.encoder_type == 'gcn':
+                adjacency_matrix = normalize_adjacency_matrix(adjacency_matrix)
+
+
             # Input Embedding
             if framenum == 0:
                 temporal_input_embedded = self.dropout_in(self.relu(self.input_embedding_layer_temporal(nodes_current)))
@@ -448,18 +486,53 @@ class STAR(torch.nn.Module):
 
             spatial_input_embedded_ = self.dropout_in2(self.relu(self.input_embedding_layer_spatial(node_abs)))
 
-            spatial_input_embedded = self.spatial_encoder_1(spatial_input_embedded_[-1].unsqueeze(1), nei_list)
+            #print("nei_list.shape", nei_list.shape)
+            #print("spatial_input_embedded_.shape", spatial_input_embedded_.shape)
+            
+            #print("spatial_input_embedded_[-1].shape", spatial_input_embedded_[-1].shape)
+            #print("spatial_input_embedded_[-1].shape", spatial_input_embedded_[-1].shape)
 
-            spatial_input_embedded = spatial_input_embedded.permute(1, 0, 2)[-1]
+            # ORG encoder 1
+            #spatial_input_embedded = self.spatial_encoder_1(spatial_input_embedded_[-1].unsqueeze(1), nei_list)
+            
+            # encoder 1
+            spatial_input_embedded = self.spatial_encoder_1(spatial_input_embedded_[-1], adjacency_matrix)
+            #spatial_input_embedded = spatial_input_embedded.unsqueeze(0)  # Shape: [1, num_nodes, embedding_dim]
+
+
+            # Removed permute
+            #spatial_input_embedded = spatial_input_embedded.permute(1, 0, 2)[-1]
+
+
             temporal_input_embedded_last = self.temporal_encoder_1(temporal_input_embedded)[-1]
 
             temporal_input_embedded = temporal_input_embedded[:-1]
 
+            #print("temporal_input_embedded_last.shape", temporal_input_embedded_last.shape)
+            #print("spatial_input_embedded.shape", spatial_input_embedded.shape)
+
             fusion_feat = torch.cat((temporal_input_embedded_last, spatial_input_embedded), dim=1)
             fusion_feat = self.fusion_layer(fusion_feat)
 
-            spatial_input_embedded = self.spatial_encoder_2(fusion_feat.unsqueeze(1), nei_list)
-            spatial_input_embedded = spatial_input_embedded.permute(1, 0, 2)
+            # ORG encoder 2
+            #spatial_input_embedded = self.spatial_encoder_2(fusion_feat.unsqueeze(1), nei_list)
+            #spatial_input_embedded = spatial_input_embedded.permute(1, 0, 2)
+
+            # encoder 2
+            spatial_input_embedded = self.spatial_encoder_2(fusion_feat, adjacency_matrix)
+            #spatial_input_embedded = spatial_input_embedded.unsqueeze(0)  # Shape: [1, num_nodes, embedding_dim]
+
+            #print("temporal_input_embedded_last.shape", temporal_input_embedded_last.shape)
+            #print("spatial_input_embedded.shape", spatial_input_embedded.shape)
+            #print("temporal_input_embedded.shape", temporal_input_embedded.shape)
+
+            if temporal_input_embedded.dim() == 2 :
+                temporal_input_embedded = temporal_input_embedded.unsqueeze(0)
+                #print("After unsqueeze, temporal_input_embedded.shape:", temporal_input_embedded.shape)
+            
+            if spatial_input_embedded.dim() == 2:
+                spatial_input_embedded = spatial_input_embedded.unsqueeze(0)
+                #print("After unsqueeze, spatial_input_embedded.shape:", spatial_input_embedded.shape)
 
             temporal_input_embedded = torch.cat((temporal_input_embedded, spatial_input_embedded), dim=0)
             temporal_input_embedded = self.temporal_encoder_2(temporal_input_embedded)[-1]
